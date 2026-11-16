@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+dist/
+Output/
+build/ffmpeg/
+build/PoruwaCutEngine/
+*.spec
+engine/_version.py
+models/*.onnx
+.poruwacut_cache/
+PoruwaCut_out/
+ffmpeg.zip
+ffx/
+testshoot/

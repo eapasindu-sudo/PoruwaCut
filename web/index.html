@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="si">
+<head>
+<meta charset="utf-8">
+<title>PoruwaCut – Multicam Auto Edit</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#1d1d1f; --panel:#262628; --line:#3a3a3d; --text:#e8e6e3; --mute:#9a9893; --acc:#d4a24c; --ok:#5fb37a; --bad:#e0645a; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 "Iskoola Pota","Noto Sans Sinhala","Segoe UI",system-ui,sans-serif; }
+  .wrap { max-width:860px; margin:0 auto; padding:28px 20px 60px; }
+  h1 { font-size:22px; margin:0 0 2px; letter-spacing:.3px; }
+  h1 span { color:var(--acc); }
+  .sub { color:var(--mute); margin:0 0 22px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px 18px; margin-bottom:14px; }
+  .card h2 { font-size:13px; text-transform:uppercase; letter-spacing:1px; color:var(--mute); margin:0 0 12px; font-weight:600; }
+  .cam { display:flex; gap:8px; align-items:center; margin-bottom:8px; }
+  .cam .n { width:58px; color:var(--mute); font-size:12px; }
+  input[type=text], input[type=number], select { background:#1a1a1c; border:1px solid var(--line); color:var(--text); border-radius:6px; padding:7px 9px; font:inherit; }
+  input[type=text] { flex:1; }
+  input:focus, select:focus { outline:none; border-color:var(--acc); }
+  label.r { display:flex; align-items:center; gap:4px; font-size:12px; color:var(--mute); white-space:nowrap; }
+  button { background:#333336; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 12px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--acc); }
+  button.go { background:var(--acc); color:#1d1d1f; border:none; font-weight:700; padding:11px 22px; font-size:15px; }
+  button.go:disabled { opacity:.5; cursor:wait; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:12px; }
+  .grid label { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--mute); }
+  .modes { display:flex; gap:10px; }
+  .mode { flex:1; border:1px solid var(--line); border-radius:8px; padding:12px; cursor:pointer; }
+  .mode.on { border-color:var(--acc); background:#2e2a22; }
+  .mode b { display:block; margin-bottom:2px; }
+  .mode small { color:var(--mute); }
+  .bar { height:8px; background:#1a1a1c; border-radius:4px; overflow:hidden; margin:10px 0; }
+  .bar i { display:block; height:100%; width:0; background:var(--acc); transition:width .4s; }
+  pre { background:#141415; border:1px solid var(--line); border-radius:6px; padding:10px; max-height:260px; overflow:auto; font-size:12px; white-space:pre-wrap; margin:0; }
+  .res { display:none; }
+  .res code { background:#141415; padding:2px 6px; border-radius:4px; user-select:all; }
+  .pill { display:inline-block; font-size:11px; padding:2px 8px; border-radius:20px; border:1px solid var(--line); color:var(--mute); margin-left:6px; }
+  .pill.ok { color:var(--ok); border-color:var(--ok); } .pill.bad { color:var(--bad); border-color:var(--bad); }
+  .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Poruwa<span>Cut</span> <span class="pill" id="st">engine…</span></h1>
+  <p class="sub">මංගල උත්සව multicam auto edit – කැමරා visuals බලලා හොඳම shot එකට මාරු කරනවා.</p>
+
+  <div class="card">
+    <h2>කැමරා (එක් කැමරාවකට එක folder එකක්)</h2>
+    <div id="cams"></div>
+    <div class="row"><button id="add">+ කැමරාවක්</button>
+      <span style="color:var(--mute);font-size:12px">● තෝරන්න = DJI mic audio තියෙන කැමරාව (master)</span></div>
+  </div>
+
+  <div class="card">
+    <h2>Mode</h2>
+    <div class="modes">
+      <div class="mode on" data-m="ceremony"><b>පෝරුව / චාරිත්‍ර</b><small>මුහුණු සහ steady shots, තත්පර 2.5–10 shots</small></div>
+      <div class="mode" data-m="dance"><b>Dance floor</b><small>Music beat එකට cut, shake නැති කැමරාව</small></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>පරාසය සහ settings</h2>
+    <div class="grid">
+      <label>ආරම්භය (mm:ss, හිස් = මුල)<input type="text" id="start" placeholder="12:30"></label>
+      <label>අවසානය (mm:ss, හිස් = අග)<input type="text" id="end" placeholder="48:00"></label>
+      <label>අවම shot (තත්පර)<input type="number" id="min_shot" step="0.5" placeholder="auto"></label>
+      <label>උපරිම shot (තත්පර)<input type="number" id="max_shot" step="0.5" placeholder="auto"></label>
+      <label>Layout<select id="layout"><option value="stacked">Stacked (Shift+E මාරු කරන්න)</option><option value="flat">Flat (V1 විතරයි)</option></select></label>
+      <label>නරක කොටස්<select id="remove_dead"><option value="">Marker දාන්න</option><option value="1">සම්පූර්ණයෙන් කපන්න</option></select></label>
+    </div>
+  </div>
+
+  <div class="row" style="margin:18px 0"><button class="go" id="go">Auto Edit ▶</button></div>
+
+  <div class="card" id="prog" style="display:none">
+    <h2>Progress</h2>
+    <div class="bar"><i id="pb"></i></div>
+    <pre id="log"></pre>
+  </div>
+
+  <div class="card res" id="res">
+    <h2>ඉවරයි ✔</h2>
+    <p id="stats"></p>
+    <p>Premiere එකේ <b>File › Import</b> → මේ file එක තෝරන්න:<br><code id="xml"></code></p>
+    <p style="color:var(--mute);font-size:13px">Stacked layout: කැමරා එක එක track එකේ. වෙනස් angle එකක් ඕන නම් ඒ කෑල්ල select කරලා <b>Shift+E</b> (enable/disable).</p>
+  </div>
+</div>
+<script>
+const API = location.origin.startsWith('http') ? location.origin : 'http://127.0.0.1:7788';
+let mode = 'ceremony', master = 0;
+const camsEl = document.getElementById('cams');
+function camRow(v='') {
+  const i = camsEl.children.length;
+  const d = document.createElement('div'); d.className = 'cam';
+  d.innerHTML = `<span class="n">Cam ${i+1}</span><input type="text" placeholder="D:\\Wedding\\Cam${i+1}" value="${v}">
+    <label class="r"><input type="radio" name="m" ${i===master?'checked':''}> DJI</label><button title="ඉවත් කරන්න">✕</button>`;
+  d.querySelector('input[type=radio]').onchange = () => { master = [...camsEl.children].indexOf(d); };
+  d.querySelector('button').onclick = () => { d.remove(); [...camsEl.children].forEach((c,k)=>c.querySelector('.n').textContent='Cam '+(k+1)); };
+  camsEl.appendChild(d);
+}
+try { (JSON.parse(localStorage.getItem('pc_cams')||'null') || ['','']).forEach(camRow); } catch(e) { camRow(); camRow(); }
+document.getElementById('add').onclick = () => camRow();
+document.querySelectorAll('.mode').forEach(m => m.onclick = () => {
+  document.querySelectorAll('.mode').forEach(x=>x.classList.remove('on')); m.classList.add('on'); mode = m.dataset.m; });
+const t2s = s => { if (!s.trim()) return null; return s.split(':').reduce((a,p)=>a*60+parseFloat(p),0); };
+const num = id => { const v = document.getElementById(id).value; return v === '' ? null : parseFloat(v); };
+
+fetch(API + '/api/ping').then(r=>r.json()).then(p => {
+  const st = document.getElementById('st'); st.className = 'pill ok';
+  st.textContent = `v${p.version} · GPU ${p.nvdec?'ON':'OFF'} · faces: ${p.face_detector}`;
+  fetch(API + '/api/update').then(r=>r.json()).then(u => { if (u.available) {
+    const b = document.createElement('button'); b.textContent = `Update v${u.latest} ▶`; b.style.marginLeft = '8px';
+    b.onclick = async () => { b.disabled = true; b.textContent = 'Updating…';
+      await fetch(API + '/api/update/install', {method:'POST'}); };
+    st.after(b); } }).catch(()=>{});
+}).catch(()=>{ const st=document.getElementById('st'); st.className='pill bad'; st.textContent='engine offline'; });
+
+document.getElementById('go').onclick = async () => {
+  const cams = [...camsEl.querySelectorAll('input[type=text]')].map(x=>x.value.trim()).filter(Boolean);
+  if (cams.length < 2) { alert('අඩුම තරමින් කැමරා 2ක folders දෙන්න'); return; }
+  try { localStorage.setItem('pc_cams', JSON.stringify(cams)); } catch(e) {}
+  const body = { project: { cams, master: master + 1, name: 'Wedding' }, mode,
+    options: { start: t2s(document.getElementById('start').value), end: t2s(document.getElementById('end').value),
+      min_shot: num('min_shot'), max_shot: num('max_shot'), layout: document.getElementById('layout').value,
+      remove_dead: !!document.getElementById('remove_dead').value } };
+  const go = document.getElementById('go'); go.disabled = true;
+  document.getElementById('prog').style.display = 'block'; document.getElementById('res').style.display = 'none';
+  const { job } = await (await fetch(API + '/api/edit', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) })).json();
+  const poll = async () => {
+    const j = await (await fetch(API + '/api/job/' + job)).json();
+    document.getElementById('pb').style.width = (j.progress*100).toFixed(0) + '%';
+    const lg = document.getElementById('log'); lg.textContent = j.log.join('\n'); lg.scrollTop = 1e9;
+    if (j.status === 'done') {
+      const s = j.result.stats; go.disabled = false;
+      document.getElementById('res').style.display = 'block';
+      document.getElementById('xml').textContent = j.result.xml;
+      document.getElementById('stats').textContent = `Cuts ${s.cuts} · සාමාන්‍ය shot ${s.avg_shot}s · ` +
+        Object.entries(s.camera_share_pct).map(([k,v])=>`${k} ${v}%`).join(' · ') + ` · නරක කොටස් ${s.dead_regions}`;
+    } else if (j.status === 'error') { go.disabled = false; }
+    else setTimeout(poll, 1000);
+  };
+  poll();
+};
+</script>
+</body>
+</html>
