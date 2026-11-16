@@ -31,8 +31,10 @@ def parse_time(s: str | None):
 
 
 def _edit_args(ap):
-    ap.add_argument("--mode", choices=["ceremony", "dance"], default="ceremony",
-                    help="ceremony = පෝරුව/කතා, dance = dance floor (beats මත cut)")
+    from .presets import PRESETS
+    ap.add_argument("--event", "--mode", dest="mode", default="auto",
+                    choices=list(PRESETS) + ["ceremony", "dance"],
+                    help="wedding event: " + ", ".join(PRESETS))
     ap.add_argument("--start", help="master timeline එකේ ආරම්භය (ss / mm:ss / hh:mm:ss)")
     ap.add_argument("--end", help="අවසානය")
     ap.add_argument("-o", "--out", default="out")
@@ -44,8 +46,6 @@ def _edit_args(ap):
     ap.add_argument("--workers", type=int, default=2)
     ap.add_argument("--min-shot", type=float)
     ap.add_argument("--max-shot", type=float)
-    ap.add_argument("--min-beats", type=int)
-    ap.add_argument("--max-beats", type=int)
     ap.add_argument("--switch-cost", type=float)
     ap.add_argument("--stay-cost", type=float, help="එකම කැමරාවේ උපරිම දිග පැනීමේ දඬුවම (වැඩි = variety වැඩි)")
     ap.add_argument("--bias", help="කැමරාවකට කැමැත්ත: උදා '0,0.3,0' (cam2 ට වැඩි ප්‍රමුඛත්වය)")
@@ -60,8 +60,8 @@ def _do_edit(p, a):
         if a.end:
             r[1] = parse_time(a.end)
         p["range"] = r
-    ov = {"min_shot": a.min_shot, "max_shot": a.max_shot, "min_beats": a.min_beats,
-          "max_beats": a.max_beats, "switch_cost": a.switch_cost, "stay_cost": a.stay_cost}
+    ov = {"min_shot": a.min_shot, "max_shot": a.max_shot, "switch_cost": a.switch_cost,
+          "stay_cost": a.stay_cost}
     if a.bias:
         ov["cam_bias"] = [float(x) for x in a.bias.split(",")]
     last = [-1]

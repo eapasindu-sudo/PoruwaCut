@@ -138,15 +138,18 @@ def score_cameras(analysis: dict, cfg: ModeConfig, beat_period: float | None = N
         central = _nan_fill(c["face_central"])
         face = (nf > 0) * (0.35 + np.clip(np.sqrt(area) / 0.22, 0, 1) * (0.5 + 0.5 * central))
         face = gaussian_filter1d(face, sig)  # detector flicker
+        pair = _nan_fill(c["pair_central"]) if "pair_central" in c else np.zeros(N)
+        couple = gaussian_filter1d(pair, sig)   # couple framed in the centre of the shot
 
         bias = cfg.cam_bias[i] if i < len(cfg.cam_bias) else 0.0
         total = (cfg.w_sharp * sharp_s - cfg.w_exposure * exposure - cfg.w_shake * shake
-                 - cfg.w_pan * pan_pen - cfg.w_obstruct * obstruct + cfg.w_face * face + bias)
+                 - cfg.w_pan * pan_pen - cfg.w_obstruct * obstruct + cfg.w_face * face
+                 + getattr(cfg, "w_couple", 0.0) * couple + bias)
         total = uniform_filter1d(total, max(1, int(cfg.smooth_sec * fps)))
         over = total > cfg.good_level
         total[over] = cfg.good_level + cfg.good_slope * (total[over] - cfg.good_level)
         total[~valid] = -1e3
         scores[i] = total
         parts.append({"sharp": sharp_s, "exposure": exposure, "shake": shake, "pan": pan_pen,
-                      "obstruct": obstruct, "face": face, "rhythm": rhythm})
+                      "obstruct": obstruct, "face": face, "couple": couple, "rhythm": rhythm})
     return scores, parts

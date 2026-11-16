@@ -1,35 +1,66 @@
-"""Choose which camera is on screen when: semi-Markov dynamic programming over blocks.
+"""Choose which camera is on screen when.
 
-Blocks are either a uniform time grid (ceremony) or the intervals between music beats
-(dance) so that every cut lands exactly on a beat.
+1. build_cut_grid : every moment where a cut is allowed, each with a "preference" weight
+   (music beat / bar start, end of a spoken phrase, or a plain time slot that is discouraged).
+2. choose        : semi-Markov dynamic programming over that grid (shot length limits in seconds,
+   cost per camera change scaled by the cut point's weight). Can continue from a previous camera,
+   which is how the live (window by window) edit stays seamless.
 """
 from __future__ import annotations
 
 import numpy as np
 
-from .scoring import ModeConfig
 
+def build_cut_grid(t0: float, t1: float, preset, beats=None, downbeats=None, phrases=None,
+                   music=None, filler_step: float = 0.5):
+    """Return (bounds[T+1], weight[T+1]).  weight multiplies the switch cost at that boundary."""
+    pts: dict[float, float] = {}
 
-def make_blocks(t0: float, t1: float, cfg: ModeConfig, beats: np.ndarray | None = None,
-                downbeats: np.ndarray | None = None, block_sec: float = 0.4):
-    """Return (boundaries[T+1], is_downbeat[T+1], (Lmin, Lmax) in blocks)."""
-    if cfg.use_beats and beats is not None and len(beats) > 8:
-        b = beats[(beats > t0 + 0.05) & (beats < t1 - 0.05)]
-        bounds = np.concatenate([[t0], b, [t1]])
-        db = np.zeros(len(bounds), bool)
-        if downbeats is not None and len(downbeats):
-            near = np.abs(bounds[:, None] - downbeats[None, :]).min(axis=1) < 0.02
-            db[near] = True
-        # keep within min/max seconds too (very slow / very fast songs)
-        period = float(np.median(np.diff(b))) if len(b) > 2 else 0.5
-        lmin = max(1, min(cfg.min_beats, int(np.ceil(cfg.min_shot / period))))
-        lmax = max(lmin + 1, min(cfg.max_beats, int(cfg.max_shot * 1.5 / period)))
-        return bounds, db, (lmin, lmax)
-    n = max(1, int(round((t1 - t0) / block_sec)))
-    bounds = np.linspace(t0, t1, n + 1)
-    lmin = max(1, int(round(cfg.min_shot / block_sec)))
-    lmax = max(lmin + 1, int(round(cfg.max_shot / block_sec)))
-    return bounds, np.zeros(n + 1, bool), (lmin, lmax)
+    def add(t, w):
+        if t0 + 0.05 < t < t1 - 0.05:
+            k = round(float(t), 3)
+            pts[k] = min(w, pts.get(k, 9.9))
+
+    grid = preset.grid
+    beats = np.asarray(beats if beats is not None else [], float)
+    downs = np.asarray(downbeats if downbeats is not None else [], float)
+    ph_t, ph_s = phrases if phrases is not None else (np.zeros(0), np.zeros(0))
+
+    def is_music(t):
+        if grid == "beats":
+            return True
+        if grid == "phrases":
+            return False
+        if music is None or len(music) == 0:
+            return len(beats) > 8
+        i = int(min(max(t - t0, 0), len(music) - 1))
+        return music[i] > 0.55
+
+    for b in beats:
+        if is_music(b):
+            add(b, 1.0)
+    for d in downs:
+        if is_music(d):
+            add(d, 0.55)
+    for t, s in zip(ph_t, ph_s):
+        if not is_music(t):
+            add(t, 0.55 - 0.3 * float(s))
+    # filler slots: allowed but discouraged (so a bad shot can still be left mid-phrase / off-beat)
+    filler_w = 3.0 if grid in ("beats", "phrases") else 2.2
+    for t in np.arange(t0 + filler_step, t1, filler_step):
+        add(t, filler_w)
+    ks = sorted(pts)
+    # merge points closer than 0.12 s (keep the preferred one)
+    merged = []
+    for k in ks:
+        if merged and k - merged[-1][0] < 0.12:
+            if pts[k] < merged[-1][1]:
+                merged[-1] = (k, pts[k])
+        else:
+            merged.append((k, pts[k]))
+    bounds = np.array([t0] + [m[0] for m in merged] + [t1])
+    weight = np.array([1.0] + [m[1] for m in merged] + [1.0])
+    return bounds, weight
 
 
 def block_scores(scores: np.ndarray, times: np.ndarray, bounds: np.ndarray) -> np.ndarray:
@@ -39,55 +70,67 @@ def block_scores(scores: np.ndarray, times: np.ndarray, bounds: np.ndarray) -> n
     idx = np.searchsorted(times, bounds)
     out = np.empty((C, T))
     cs = np.concatenate([np.zeros((C, 1)), np.cumsum(scores, axis=1)], axis=1)
+    nmax = scores.shape[1]
     for k in range(T):
-        a, b = idx[k], max(idx[k + 1], idx[k] + 1)
-        b = min(b, scores.shape[1])
-        a = min(a, b - 1)
+        a = min(idx[k], nmax - 1)
+        b = min(max(idx[k + 1], a + 1), nmax)
         out[:, k] = (cs[:, b] - cs[:, a]) / (b - a) * (bounds[k + 1] - bounds[k])
     return out
 
 
-def choose(bs: np.ndarray, lmin: int, lmax: int, cfg: ModeConfig, is_down: np.ndarray) -> np.ndarray:
-    """Semi-Markov DP. Returns camera index per block."""
+def choose(bs: np.ndarray, bounds: np.ndarray, weight: np.ndarray, preset, prev_cam: int | None = None,
+           final: bool = True) -> np.ndarray:
+    """Semi-Markov DP with shot lengths in seconds. Returns camera index per block."""
     C, T = bs.shape
     cs = np.concatenate([np.zeros((C, 1)), np.cumsum(bs, axis=1)], axis=1).T  # [T+1, C]
     best = np.full((T + 1, C), -np.inf)
-    arg_l = np.zeros((T + 1, C), np.int64)
+    arg_s = np.zeros((T + 1, C), np.int64)
     arg_c = np.zeros((T + 1, C), np.int64)
     best[0] = 0.0
-    # transition cost matrix (prev -> next)
-    trans = np.full((C, C), cfg.switch_cost)
-    np.fill_diagonal(trans, cfg.stay_cost)
+    trans = np.full((C, C), preset.switch_cost)
+    # re-starting the same camera = an over-long shot in disguise; only worth it when every other
+    # camera is unusable (not recording / far worse)
+    np.fill_diagonal(trans, preset.switch_cost + 4.0 * preset.stay_cost)
+    hard_max = preset.max_shot * 2.0
+    first_cost = np.zeros(C)
+    if prev_cam is not None:
+        first_cost = np.full(C, preset.switch_cost * weight[0])
+        first_cost[prev_cam] = 0.0
     for t in range(1, T + 1):
-        lo = 1 if t == T else lmin          # the very last shot may be short
-        ls = np.arange(lo, min(lmax, t) + 1)
-        if len(ls) == 0:
-            ls = np.array([t])
-        starts = t - ls                      # [L]
-        seg = cs[t][None, :] - cs[starts]    # [L, C]
-        prev = best[starts]                  # [L, C']
-        disc = np.where(is_down[starts], cfg.downbeat_discount, 1.0)[:, None, None]
-        cand = prev[:, :, None] - trans[None, :, :] * disc   # [L, C', C]
-        cand[starts == 0] = 0.0              # first shot: no transition cost
-        pc = cand.argmax(axis=1)             # [L, C]
+        dur_all = bounds[t] - bounds[:t]                      # durations for starts 0..t-1
+        ok = dur_all <= hard_max
+        if not (final and t == T):
+            ok &= (dur_all >= preset.min_shot) | (np.arange(t) == 0)
+        starts = np.nonzero(ok)[0]
+        if len(starts) == 0:
+            starts = np.array([t - 1])
+        dur = dur_all[starts]
+        seg = cs[t][None, :] - cs[starts]                     # [L, C]
+        over = 2.0 * preset.stay_cost * np.maximum(0.0, dur - preset.max_shot) / preset.max_shot
+        prev = best[starts]                                   # [L, C']
+        cand = prev[:, :, None] - trans[None] * weight[starts][:, None, None]  # [L, C', C]
+        z = starts == 0
+        if z.any():
+            cand[z] = -np.inf
+            cand[z, 0, :] = -first_cost[None, :]
+        pc = cand.argmax(axis=1)                              # [L, C]
         pv = np.take_along_axis(cand, pc[:, None, :], 1)[:, 0, :]
-        tot = seg + pv
-        li = tot.argmax(axis=0)              # [C]
+        tot = seg + pv - over[:, None]
+        li = tot.argmax(axis=0)
         best[t] = tot[li, np.arange(C)]
-        arg_l[t] = ls[li]
+        arg_s[t] = starts[li]
         arg_c[t] = pc[li, np.arange(C)]
-    # backtrack
     choice = np.zeros(T, np.int64)
     t, c = T, int(best[T].argmax())
     while t > 0:
-        l, pc = arg_l[t, c], arg_c[t, c]
-        choice[t - l:t] = c
-        t, c = t - l, int(pc)
+        s, pcam = arg_s[t, c], arg_c[t, c]
+        choice[s:t] = c
+        t, c = s, int(pcam)
     return choice
 
 
-def to_segments(choice: np.ndarray, bounds: np.ndarray, bs: np.ndarray, cfg: ModeConfig):
-    """Merge equal neighbours; flag 'dead' blocks where even the best camera is bad."""
+def to_segments(choice: np.ndarray, bounds: np.ndarray, bs: np.ndarray, preset):
+    """Merge equal neighbours; flag 'dead' stretches where even the best camera is bad."""
     segs = []
     T = len(choice)
     for k in range(T):
@@ -99,32 +142,29 @@ def to_segments(choice: np.ndarray, bounds: np.ndarray, bs: np.ndarray, cfg: Mod
             segs[-1]["_q"].append((q, dur))
         else:
             segs.append({"cam": c, "start": float(bounds[k]), "end": float(bounds[k + 1]), "_q": [(q, dur)]})
-    # dead regions
     best_q = bs.max(axis=0) / np.maximum(np.diff(bounds), 1e-6)
     dead = []
     k = 0
     while k < T:
-        if best_q[k] < cfg.dead_threshold:
+        if best_q[k] < preset.dead_threshold:
             j = k
-            while j < T and best_q[j] < cfg.dead_threshold:
+            while j < T and best_q[j] < preset.dead_threshold:
                 j += 1
-            if bounds[j] - bounds[k] >= cfg.dead_min_sec:
+            if bounds[j] - bounds[k] >= preset.dead_min_sec:
                 dead.append({"start": float(bounds[k]), "end": float(bounds[j])})
             k = j
         else:
             k += 1
-    # merge dead regions separated by tiny gaps (avoid 0.4 s orphan clips)
     merged = []
     for d in dead:
-        if merged and d["start"] - merged[-1]["end"] < max(1.0, cfg.min_shot * 0.6):
+        if merged and d["start"] - merged[-1]["end"] < max(1.0, preset.min_shot * 0.6):
             merged[-1]["end"] = d["end"]
         else:
             merged.append(d)
-    dead = merged
     for s in segs:
         qs = s.pop("_q")
         s["quality"] = float(sum(q * d for q, d in qs) / max(1e-6, sum(d for _, d in qs)))
-    return segs, dead
+    return segs, merged
 
 
 def apply_dead_cuts(segs: list[dict], dead: list[dict]) -> list[dict]:

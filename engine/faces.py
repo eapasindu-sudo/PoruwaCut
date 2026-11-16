@@ -53,13 +53,26 @@ class FaceDetector:
 
 
 def face_features(faces: np.ndarray, w: int, h: int):
-    """(count, largest_area_ratio, centrality_of_largest 0..1, mean_score)."""
+    """(count, largest_area_ratio, centrality_of_largest 0..1, mean_score, pair_central 0..1).
+
+    pair_central: for the two biggest faces (the couple), how close the middle point between them
+    sits to the frame centre, also requiring the two faces to be of similar size (both in focus/near).
+    0 when fewer than two faces.
+    """
     if len(faces) == 0:
-        return 0, 0.0, 0.0, 0.0
+        return 0, 0.0, 0.0, 0.0, 0.0
     areas = faces[:, 2] * faces[:, 3] / float(w * h)
-    i = int(np.argmax(areas))
+    order = np.argsort(-areas)
+    i = int(order[0])
     cx = (faces[i, 0] + faces[i, 2] / 2) / w
     cy = (faces[i, 1] + faces[i, 3] / 2) / h
     # rule-of-thirds friendly: centre band is good, edges are bad
     central = float(np.clip(1 - (abs(cx - 0.5) / 0.5) ** 2 - 0.5 * max(0, abs(cy - 0.4) - 0.2), 0, 1))
-    return int(len(faces)), float(areas[i]), central, float(faces[:, 4].mean())
+    pair = 0.0
+    if len(faces) >= 2:
+        j = int(order[1])
+        if areas[j] > 0.35 * areas[i]:  # second face comparable -> likely the couple, not a guest behind
+            px = ((faces[i, 0] + faces[i, 2] / 2) + (faces[j, 0] + faces[j, 2] / 2)) / 2 / w
+            py = ((faces[i, 1] + faces[i, 3] / 2) + (faces[j, 1] + faces[j, 3] / 2)) / 2 / h
+            pair = float(np.clip(1 - (abs(px - 0.5) / 0.35) ** 2 - 0.6 * max(0, abs(py - 0.42) - 0.18), 0, 1))
+    return int(len(faces)), float(areas[i]), central, float(faces[:, 4].mean()), pair

@@ -1,4 +1,9 @@
-"""End-to-end: project -> analysis -> scores -> camera choice -> result.json (+ Premiere XML)."""
+"""End-to-end, window by window so cuts can be applied to the timeline while analysis runs.
+
+audio (beats, phrase ends, music) -> for each 60 s window: analyse all cameras -> score ->
+dynamic programming from the last committed cut -> commit cuts older than the look-ahead ->
+on_segments callback (the panel razors the timeline live) -> final result.json (+ XML).
+"""
 from __future__ import annotations
 
 import csv
@@ -9,126 +14,162 @@ import time
 import numpy as np
 
 from . import beats as beatmod
-from .analyze import analyze_cameras
-from .media import extract_audio
-from .scoring import PRESETS, ModeConfig, score_cameras
-from .switcher import make_blocks, block_scores, choose, to_segments, apply_dead_cuts
+from . import presets
+from .analyze import METRICS, analyze_cameras
+from .audio_events import music_activity, phrase_points, sequence_audio
+from .scoring import score_cameras
+from .switcher import apply_dead_cuts, block_scores, build_cut_grid, choose, to_segments
 from .xml_export import build_xml
 
 
-def master_audio(project: dict, t0: float, t1: float, rate: int) -> np.ndarray:
-    buf = np.zeros(int((t1 - t0) * rate) + 1, np.float32)
-    for cl in project["cameras"][project["master_cam"]]["clips"]:
-        a, b = max(t0, cl["tl_start"]), min(t1, cl["tl_end"])
-        if b - a < 0.5:
-            continue
-        x = extract_audio(cl["path"], rate, start=a - cl["offset"], duration=b - a)
-        i = int((a - t0) * rate)
-        n = min(len(x), len(buf) - i)
-        buf[i:i + n] = x[:n]
-    return buf
+def _merge_into(committed: list, new: list):
+    for s in new:
+        if committed and committed[-1]["cam"] == s["cam"] and abs(committed[-1]["end"] - s["start"]) < 1e-3:
+            committed[-1]["end"] = s["end"]
+        else:
+            committed.append(dict(s))
 
 
-def make_config(mode: str, overrides: dict | None = None) -> ModeConfig:
-    base = PRESETS[mode].to_dict()
-    for k, v in (overrides or {}).items():
-        if v is not None and k in base:
-            base[k] = type(base[k])(v) if not isinstance(base[k], list) else v
-    return ModeConfig(**base)
-
-
-def run(project: dict, mode: str = "ceremony", out_dir: str = "out", overrides: dict | None = None,
+def run(project: dict, event: str = "auto", out_dir: str = "out", overrides: dict | None = None,
         analysis_fps: float = 5.0, use_gpu: bool = True, workers: int = 2, layout: str = "stacked",
         remove_dead: bool = False, cache_dir: str | None = None, write_xml: bool = True, log=print,
-        progress=None) -> dict:
-    """progress(stage, overall_fraction, stage_fraction) is called often during the run."""
-    stages = {"beats": (0.00, 0.04), "analysis": (0.04, 0.96), "cuts": (0.96, 0.99), "xml": (0.99, 1.0)}
+        progress=None, on_segments=None, window: float = 60.0, lookahead: float = 12.0) -> dict:
+    """progress(stage, overall, stage_frac); on_segments(committed_segments, committed_until)."""
+    t_start = time.time()
+    if event in ("ceremony",):
+        event = "poruwa"
+    elif event in ("dance",):
+        event = "dance_floor"
+    os.makedirs(out_dir, exist_ok=True)
+    cache_dir = cache_dir or os.path.join(os.path.dirname(os.path.abspath(out_dir)), ".poruwacut_cache")
+    preset = presets.get(event, overrides)
+    t0, t1 = project["range"]
+    fps = float(project["fps"])
+    stages = {"audio": (0.0, 0.05), "analysis": (0.05, 0.97), "cuts": (0.97, 0.99), "xml": (0.99, 1.0)}
 
     def prog(stage, f):
         if progress:
             a, b = stages[stage]
             progress(stage, a + (b - a) * f, f)
 
-    t_start = time.time()
-    os.makedirs(out_dir, exist_ok=True)
-    # shared by every output folder next to it, so ceremony + dance runs reuse one analysis
-    cache_dir = cache_dir or os.path.join(os.path.dirname(os.path.abspath(out_dir)), ".poruwacut_cache")
-    cfg = make_config(mode, overrides)
-    t0, t1 = project["range"]
-    fps = float(project["fps"])
-    log(f"Mode: {mode} | පරාසය {t0:.1f}s - {t1:.1f}s ({(t1 - t0) / 60:.1f} min) | cams {len(project['cameras'])}")
+    log(f"Event: {preset.en} | {t0:.1f}s - {t1:.1f}s ({(t1 - t0) / 60:.1f} min) | cams {len(project['cameras'])}")
 
+    # ---- audio: beats, phrase ends, music activity -------------------------------------------
+    prog("audio", 0.0)
+    log("Audio එක අහමින් (beats, වචන ඉවර වෙන තැන්, music)...")
+    audio = sequence_audio(project, t0, t1, beatmod.SR)
     beats = dbeats = np.zeros(0)
-    tempos, beat_period = [], None
-    if cfg.use_beats:
-        prog("beats", 0.0)
-        log("Music beats හොයමින්...")
-        audio = master_audio(project, t0, t1, beatmod.SR)
-        b, tempos, strength = beatmod.detect_beats(audio)
-        beats = b + t0
-        dbeats = beatmod.downbeats(beats, strength)
-        if len(b) > 2:
-            beat_period = float(np.median(np.diff(b)))
-            log(f"  beats {len(beats)}, tempo ~{60 / beat_period:.0f} BPM")
-        else:
-            log("  beats හමු නොවුණි - time grid එකට cut කරයි")
+    beat_period = None
+    music = np.zeros(int(t1 - t0) + 1)
+    ph = (np.zeros(0), np.zeros(0))
+    if len(audio) > beatmod.SR * 2 and np.abs(audio).max() > 0:
+        if preset.grid in ("beats", "auto"):
+            b, _tempos, strength = beatmod.detect_beats(audio)
+            beats = b + t0
+            dbeats = beatmod.downbeats(beats, strength)
+            if len(b) > 2:
+                beat_period = float(np.median(np.diff(b)))
+        prog("audio", 0.5)
+        if preset.grid in ("phrases", "auto"):
+            pt, ps = phrase_points(audio, beatmod.SR)
+            ph = (pt + t0, ps)
+        if preset.grid == "auto":
+            music = music_activity(audio, beatmod.SR)
+        log(f"  beats {len(beats)}" + (f" (~{60 / beat_period:.0f} BPM)" if beat_period else "")
+            + f", වචන ඉවර වෙන තැන් {len(ph[0])}"
+            + (f", music {100 * float((music > 0.55).mean()):.0f}% of time" if preset.grid == "auto" else ""))
+    else:
+        log("  Audio නැහැ - visuals විතරක් බලලා cut කරනවා")
+    prog("audio", 1.0)
+    del audio
 
-    log("Visual analysis (segment by segment)...")
-    prog("analysis", 0.0)
-    an = analyze_cameras(project["cameras"], t0, t1, analysis_fps, cache_dir, use_gpu, workers, log,
-                         progress=lambda f: prog("analysis", f))
-    dets = {c.get("detector", "?") for c in an["cams"]}
-    log(f"  face detector: {', '.join(sorted(dets))}")
-
-    prog("cuts", 0.0)
-    log("Shots score කරමින් සහ cut තෝරමින්...")
-    scores, parts = score_cameras(an, cfg, beat_period)
-    bounds, is_down, (lmin, lmax) = make_blocks(t0, t1, cfg, beats, dbeats)
-    bs = block_scores(scores, an["times"], bounds)
-    choice = choose(bs, lmin, lmax, cfg, is_down)
-    segs, dead = to_segments(choice, bounds, bs, cfg)
-
-    # snap to sequence frames
-    for s in segs:
-        s["start"] = round(s["start"] * fps) / fps
-        s["end"] = round(s["end"] * fps) / fps
-    segs = [s for s in segs if s["end"] > s["start"]]
-    final = apply_dead_cuts(segs, dead) if remove_dead else segs
-
+    # ---- window by window ---------------------------------------------------------------------
+    log("කැමරා visuals analyze කරමින් (window එකෙන් window එක, cuts live)...")
     C = len(project["cameras"])
-    total = sum(s["end"] - s["start"] for s in final) or 1
-    share = {project["cameras"][c]["name"]: round(100 * sum(s["end"] - s["start"] for s in final if s["cam"] == c) / total, 1)
-             for c in range(C)}
-    lens = [s["end"] - s["start"] for s in final]
+    acc_times: list = []
+    acc = [{m: [] for m in METRICS} for _ in range(C)]
+    committed: list[dict] = []
+    commit_t, prev_cam = t0, None
+    wins = list(np.arange(t0, t1, window))
+    detectors = set()
+    times = np.zeros(0)
+    scores = np.zeros((C, 0))
+    for wi, w0 in enumerate(wins):
+        w1 = min(t1, w0 + window)
+        final = wi == len(wins) - 1
+        an = analyze_cameras(project["cameras"], w0, w1, analysis_fps, cache_dir, use_gpu, workers,
+                             log=lambda m: None,
+                             progress=lambda f, wi=wi: prog("analysis", (wi + f) / len(wins)))
+        acc_times.append(an["times"])
+        for i in range(C):
+            detectors.add(an["cams"][i].get("detector", "?"))
+            for m in METRICS:
+                acc[i][m].append(an["cams"][i][m])
+        times = np.concatenate(acc_times)
+        analysis = {"times": times, "fps": analysis_fps,
+                    "cams": [{m: np.concatenate(acc[i][m]) for m in METRICS} for i in range(C)]}
+        scores, _parts = score_cameras(analysis, preset, beat_period)
+        if w1 - commit_t < preset.min_shot + lookahead and not final:
+            continue
+        bounds, weight = build_cut_grid(commit_t, w1, preset, beats, dbeats, ph,
+                                        music[int(commit_t - t0):] if len(music) else None)
+        bs = block_scores(scores, times, bounds)
+        choice = choose(bs, bounds, weight, preset, prev_cam, final=final)
+        segs, _ = to_segments(choice, bounds, bs, preset)
+        limit = w1 if final else w1 - lookahead
+        new = [s for s in segs if s["end"] <= limit + 1e-6]
+        if new:
+            for s in new:  # snap to sequence frames
+                s["start"] = round(s["start"] * fps) / fps
+                s["end"] = round(s["end"] * fps) / fps
+            new = [s for s in new if s["end"] > s["start"]]
+        if new:
+            _merge_into(committed, new)
+            commit_t, prev_cam = committed[-1]["end"], committed[-1]["cam"]
+            if on_segments:
+                on_segments([dict(s) for s in committed], commit_t)
+        log(f"  {(w1 - t0) / 60:.1f}/{(t1 - t0) / 60:.1f} min: cuts {max(0, len(committed) - 1)}")
+    log(f"  face detector: {', '.join(sorted(detectors))}")
+
+    # ---- weak stretches (all cameras poor) -------------------------------------------------
+    prog("cuts", 0.0)
+    bounds = np.arange(t0, t1 + 0.5, 0.5)
+    bounds[-1] = t1
+    bounds = np.unique(bounds)
+    bs = block_scores(scores, times, bounds)
+    _, dead = to_segments(np.argmax(bs, axis=0), bounds, bs, preset)
+    final_segs = apply_dead_cuts(committed, dead) if remove_dead else committed
+
+    total = sum(s["end"] - s["start"] for s in final_segs) or 1
+    share = {project["cameras"][c]["name"]: round(100 * sum(s["end"] - s["start"] for s in final_segs
+                                                          if s["cam"] == c) / total, 1) for c in range(C)}
+    lens = [s["end"] - s["start"] for s in final_segs]
     result = {
-        "mode": mode, "range": [t0, t1], "fps": fps, "config": cfg.to_dict(),
-        "segments": final, "dead": dead, "remove_dead": remove_dead,
-        "beats": [round(float(x), 3) for x in beats], "tempos": tempos,
-        "markers": [],
-        "stats": {"cuts": max(0, len(final) - 1), "avg_shot": round(float(np.mean(lens)), 2) if lens else 0,
+        "event": preset.id, "mode": preset.id, "range": [t0, t1], "fps": fps, "config": preset.to_dict(),
+        "segments": final_segs, "dead": dead, "remove_dead": remove_dead,
+        "markers": [{"time": d["start"], "name": "CHECK - all cams weak"} for d in dead],
+        "stats": {"cuts": max(0, len(final_segs) - 1), "avg_shot": round(float(np.mean(lens)), 2) if lens else 0,
                   "camera_share_pct": share, "dead_regions": len(dead),
                   "dead_seconds": round(sum(d["end"] - d["start"] for d in dead), 1),
+                  "beats": int(len(beats)), "phrase_points": int(len(ph[0])),
                   "seconds": round(time.time() - t_start, 1)},
     }
-    with open(os.path.join(out_dir, "result.json"), "w", encoding="utf-8") as f:
-        json.dump(result, f, indent=2, ensure_ascii=False)
     with open(os.path.join(out_dir, "cuts.csv"), "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["start_sec", "end_sec", "camera", "quality"])
-        for s in final:
-            w.writerow([f"{s['start']:.3f}", f"{s['end']:.3f}", project["cameras"][s["cam"]]["name"], f"{s['quality']:.2f}"])
-    np.savez_compressed(os.path.join(out_dir, "scores.npz"), times=an["times"], scores=scores)
-
+        for s in final_segs:
+            w.writerow([f"{s['start']:.3f}", f"{s['end']:.3f}", project["cameras"][s["cam"]]["name"],
+                        f"{s.get('quality', 0):.2f}"])
+    np.savez_compressed(os.path.join(out_dir, "scores.npz"), times=times, scores=scores)
     prog("xml", 0.0)
     if write_xml:
-        xp = os.path.join(out_dir, f"AutoEdit_{mode}.xml")
+        xp = os.path.join(out_dir, f"AutoEdit_{preset.id}.xml")
         build_xml(project, result, xp, layout=layout, remove_dead=remove_dead)
         result["xml"] = os.path.abspath(xp)
-        log(f"XML: {xp}")
+    with open(os.path.join(out_dir, "result.json"), "w", encoding="utf-8") as f:
+        json.dump(result, f, indent=2, ensure_ascii=False)
     prog("xml", 1.0)
     st = result["stats"]
     log(f"ඉවරයි: cuts {st['cuts']}, සාමාන්‍ය shot {st['avg_shot']}s, cams {share}, "
-        f"නරක කොටස් {st['dead_regions']} ({st['dead_seconds']}s), කාලය {st['seconds']}s")
-    with open(os.path.join(out_dir, "result.json"), "w", encoding="utf-8") as f:
-        json.dump(result, f, indent=2, ensure_ascii=False)
+        f"දුර්වල කොටස් {st['dead_regions']}, කාලය {st['seconds']}s")
     return result

@@ -17,11 +17,12 @@ from .faces import FaceDetector, face_features
 from .media import iter_frames, probe
 
 METRICS = ["sharp", "bright", "clip_hi", "clip_lo", "dx", "dy", "phase_resp",
-           "local_change", "edges", "faces", "face_area", "face_central", "face_score"]
+           "local_change", "edges", "faces", "face_area", "face_central", "face_score", "pair_central"]
 
 ANALYSIS_WIDTH = 480
 SMALL_WIDTH = 160
-VERSION = "1"
+VERSION = "2"
+CHUNK_LEN = 60.0  # seconds per analysed segment (smaller = smoother live progress)
 
 
 def _cache_path(cache_dir: str, path: str, chunk_start: float, chunk_len: float, fps: float) -> str:
@@ -72,15 +73,16 @@ def _analyze_chunk(path: str, start: float, length: float, fps: float, use_gpu: 
         prev_small = small
 
         faces = det.detect(frame)
-        c, area, central, score = face_features(faces, w, h)
+        c, area, central, score, pair = face_features(faces, w, h)
         out["faces"][k], out["face_area"][k] = c, area
         out["face_central"][k], out["face_score"][k] = central, score
+        out["pair_central"][k] = pair
     out["_detector"] = np.array(det.kind)
     return out
 
 
 def analyze_file(path: str, f_start: float, f_end: float, fps: float, cache_dir: str,
-                 chunk_len: float = 300.0, use_gpu: bool = True, progress=None, tick=None) -> dict:
+                 chunk_len: float = CHUNK_LEN, use_gpu: bool = True, progress=None, tick=None) -> dict:
     """Metrics on grid times j/fps for f_start <= j/fps < f_end (file time)."""
     os.makedirs(cache_dir, exist_ok=True)
     info = probe(path)
@@ -144,8 +146,8 @@ def analyze_cameras(cams: list[dict], t0: float, t1: float, fps: float, cache_di
     total = 0.0
     for i, cl, a, b in jobs:
         fa, fb = a - cl["offset"], b - cl["offset"]
-        cs = math.floor(max(0.0, fa) / 300.0) * 300.0
-        ce = min(math.ceil(fb / 300.0) * 300.0, cl.get("duration", fb) or fb)
+        cs = math.floor(max(0.0, fa) / CHUNK_LEN) * CHUNK_LEN
+        ce = min(math.ceil(fb / CHUNK_LEN) * CHUNK_LEN, cl.get("duration", fb) or fb)
         total += max(1e-3, ce - cs)
     acc = [0.0]
 

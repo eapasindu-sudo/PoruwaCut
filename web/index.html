@@ -54,11 +54,8 @@
   </div>
 
   <div class="card">
-    <h2>Mode</h2>
-    <div class="modes">
-      <div class="mode on" data-m="ceremony"><b>පෝරුව / චාරිත්‍ර</b><small>මුහුණු සහ steady shots, තත්පර 2.5–10 shots</small></div>
-      <div class="mode" data-m="dance"><b>Dance floor</b><small>Music beat එකට cut, shake නැති කැමරාව</small></div>
-    </div>
+    <h2>Event</h2>
+    <select id="event" style="width:100%"></select>
   </div>
 
   <div class="card">
@@ -68,7 +65,7 @@
       <label>අවසානය (mm:ss, හිස් = අග)<input type="text" id="end" placeholder="48:00"></label>
       <label>අවම shot (තත්පර)<input type="number" id="min_shot" step="0.5" placeholder="auto"></label>
       <label>උපරිම shot (තත්පර)<input type="number" id="max_shot" step="0.5" placeholder="auto"></label>
-      <label>Layout<select id="layout"><option value="stacked">Stacked (Shift+E මාරු කරන්න)</option><option value="flat">Flat (V1 විතරයි)</option></select></label>
+      
       <label>නරක කොටස්<select id="remove_dead"><option value="">Marker දාන්න</option><option value="1">සම්පූර්ණයෙන් කපන්න</option></select></label>
     </div>
   </div>
@@ -91,7 +88,7 @@
 </div>
 <script>
 const API = location.origin.startsWith('http') ? location.origin : 'http://127.0.0.1:7788';
-let mode = 'ceremony', master = 0;
+let master = 0;
 const camsEl = document.getElementById('cams');
 function camRow(v='') {
   const i = camsEl.children.length;
@@ -104,8 +101,8 @@ function camRow(v='') {
 }
 try { (JSON.parse(localStorage.getItem('pc_cams')||'null') || ['','']).forEach(camRow); } catch(e) { camRow(); camRow(); }
 document.getElementById('add').onclick = () => camRow();
-document.querySelectorAll('.mode').forEach(m => m.onclick = () => {
-  document.querySelectorAll('.mode').forEach(x=>x.classList.remove('on')); m.classList.add('on'); mode = m.dataset.m; });
+fetch(API + '/api/presets').then(r=>r.json()).then(p => { const s = document.getElementById('event');
+  p.events.forEach(e => { const o = document.createElement('option'); o.value = e.id; o.textContent = e.si + (e.en !== e.si ? ' · ' + e.en : ''); s.appendChild(o); }); });
 const t2s = s => { if (!s.trim()) return null; return s.split(':').reduce((a,p)=>a*60+parseFloat(p),0); };
 const num = id => { const v = document.getElementById(id).value; return v === '' ? null : parseFloat(v); };
 
@@ -123,9 +120,9 @@ document.getElementById('go').onclick = async () => {
   const cams = [...camsEl.querySelectorAll('input[type=text]')].map(x=>x.value.trim()).filter(Boolean);
   if (cams.length < 2) { alert('අඩුම තරමින් කැමරා 2ක folders දෙන්න'); return; }
   try { localStorage.setItem('pc_cams', JSON.stringify(cams)); } catch(e) {}
-  const body = { project: { cams, master: master + 1, name: 'Wedding' }, mode,
+  const body = { project: { cams, master: master + 1, name: 'Wedding' }, event: document.getElementById('event').value || 'auto',
     options: { start: t2s(document.getElementById('start').value), end: t2s(document.getElementById('end').value),
-      min_shot: num('min_shot'), max_shot: num('max_shot'), layout: document.getElementById('layout').value,
+      min_shot: num('min_shot'), max_shot: num('max_shot'), layout: 'stacked',
       remove_dead: !!document.getElementById('remove_dead').value } };
   const go = document.getElementById('go'); go.disabled = true;
   document.getElementById('prog').style.display = 'block'; document.getElementById('res').style.display = 'none';

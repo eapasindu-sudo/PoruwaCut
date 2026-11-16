@@ -36,7 +36,7 @@
 
 ## 2. Updates
 
-- අලුත් version එකක් ආවම Premiere panel එකේ උඩින් **"අලුත් version එකක්"** banner එකක් එනවා. **Update කරන්න** ඔබන්න.
+- Panel එකේ පහළ දකුණේ **Check update** button එක තියෙනවා. අලුත් version එකක් ආවම උඩින් banner එකක් එනවා, **Update කරන්න** ඔබන්න.
 - Engine එක installer එක download කරලා, checksum එක check කරලා, නිහඬව (silent) install කරනවා. Plugin එකත් update වෙනවා.
 - ඉවර වුණාම **Premiere restart කරන්න**.
 - Edit එකක් run වෙද්දී update වෙන්නේ නැහැ.
@@ -61,21 +61,29 @@ GitHub නැතිව ඔබේ PC එකේම build කරන්න: Python 3
 ### Source එකෙන් කෙලින්ම run කිරීම (developer mode)
 `install.bat` (Python packages) → `start_engine.bat`. Panel එක UXP Developer Tool › Add Plugin › `premiere-uxp/manifest.json` › Load.
 
-## 4. Premiere panel එකෙන් වැඩ කරන විදිහ (නිර්දේශිත)
+## 4. Premiere panel එකෙන් වැඩ කරන විදිහ
 
-1. සාමාන්‍ය විදිහටම footage sync කරන්න:
-   - **එක් කැමරාවකට එක video track එකක්**: V1 = Cam 1, V2 = Cam 2, ...
-   - DJI mic audio: A1 = mic 1, A2 = mic 2 (ඕන විදිහකට තියන්න, ඒ layout එකම output එකට එනවා).
-   - කැමරාවක් file කිහිපයකට කැඩිලා නම් ඒ track එකේම එකට තියන්න. ප්‍රශ්නයක් නැහැ.
-   - Multicam source sequence එකක් තියෙනවා නම්: Project panel › right-click › **Open in Timeline** කරලා ඒකේ run කරන්න.
-2. පෝරුව කොටස විතරක් නම්: ඒ කොටසට **In (I) / Out (O)** points දාන්න.
-3. Panel › **Sequence කියවන්න** › DJI audio කැමරාව තෝරන්න › Mode (පෝරුව / Dance) › **Auto Edit ▶**.
-4. ඉවර වුණාම අලුත් sequence එකක් ඉබේම import වෙලා open වෙනවා.
+1. සාමාන්‍ය විදිහටම footage sync කරන්න: **එක් කැමරාවකට එක video track එකක්** (V1 = Cam 1, V2 = Cam 2, ...).
+   Audio (DJI mics ආදිය) ඔබට කැමති විදිහට තියන්න. PoruwaCut ඒවා beats/වචන හොයන්න විතරක් අහනවා, වෙනස් කරන්නේ නැහැ.
+2. කොටසක් විතරක් නම් **In (I) / Out (O)** points දාන්න.
+3. Window › UXP Plugins › **PoruwaCut** › **Sequence කියවන්න**.
+4. **Event** එක තෝරන්න: Auto (AI), Groom/Bride Welcome, පෝරුව, පහන / කිරි කළය, First Dance, Table Visit,
+   Surprise Dance, Dance Floor, Speeches, Church Mass. (අලුත් events update එකෙන්ම එනවා.)
+5. **Edit වර්ගය**:
+   - **Multicamera edit**: කැමරා nest කරලා multicam enable කරලා angle cuts. Analysis එක යන ගමන් nest එක timeline
+     එකේ live cut වෙනවා. ඉවර වුණාම project එක save කරලා, හැම කෑල්ලක්ම multicam clip එකක් වුණු **project copy එකක්**
+     (`<project> - PoruwaCut <time>.prproj`) open වෙනවා. Program Monitor › Multi-Camera view (Shift+0) එකෙන් angles මාරු කරන්න.
+   - **Manual cutting (stacked)**: sequence එක clone කරලා, කැමරා tracks live razor කරලා තෝරපු කැමරාව විතරක් enable කරනවා.
+     Angle එකක් මාරු කරන්න කෑල්ල select කරලා **Shift+E**.
+6. **Auto Edit ▶**. ප්‍රතිශතය, ඉතිරි කාලය සහ timeline එකේ වැටුණු cuts ගණන පේනවා.
 
-### ප්‍රතිඵලය සංස්කරණය කිරීම (Stacked layout)
-- කැමරා එක එකක් තමන්ගේම track එකේ, හැම cut එකකදීම razor කරලා. තෝරපු කැමරාවේ කෑල්ල විතරක් enabled.
-- **Angle එක මාරු කරන්න:** ඕන කැමරාවේ කෑල්ල select කරලා **Shift+E** (enable), දැනට තියෙන එක **Shift+E** (disable).
-- "CHECK" markers = කැමරා සියල්ලම දුර්වල තැන්. මේවා අතින් බලන්න.
+### Events වල cut කරන විදිහ
+| Event | Cuts වැටෙන්නේ | විශේෂ |
+|---|---|---|
+| Auto (AI) | Music තියෙන තැන් beats වලට, කතා/ගාථා තියෙන තැන් වචන ඉවර වෙන තැන් වලට | couple මැද ඉන්න shots වලට කැමැත්ත |
+| පෝරුව, පහන/කිරි කළය, Speeches, Church Mass | වචන / ගාථා ඉවර වෙන තැන් | steady shots, මුහුණු, couple centre |
+| First Dance, Dance Floor, Surprise Dance | Music beat / bar එකට | Music එකට යන handheld movement එකට සමාව දෙනවා |
+| Groom/Bride Welcome, Table Visit | Auto | ඉක්මන් shots, මුහුණු |
 
 ## 5. Browser එකෙන් (panel නැතිව)
 
