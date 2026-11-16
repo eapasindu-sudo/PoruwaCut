@@ -43,15 +43,15 @@
 
 ## 3. අලුත් version එකක් release කරන විදිහ (developer ට)
 
-GitHub repo එකට code එක push කරලා version tag එකක් දාන්න:
-```bash
-git tag v0.2.0
-git push origin v0.2.0
-```
+`VERSION` file එකේ අංකය වැඩි කරලා (උදා: `0.1.0` → `0.2.0`) `main` එකට push කරන්න. ඒ විතරයි.
+(GitHub website එකේම VERSION file එක edit කරලා "Commit changes" කරන්නත් පුළුවන්.)
+
 GitHub Actions (`.github/workflows/release.yml`) Windows machine එකක:
 1. Engine එක PyInstaller එකෙන් `PoruwaCutEngine.exe` කරනවා (FFmpeg LGPL build + YuNet model එක්ක).
 2. ඒ exe එක run කරලා test edit එකක් කරලා බලනවා (smoke test).
-3. `PoruwaCut_<ver>.ccx` සහ `PoruwaCut_Setup_<ver>.exe` හදලා GitHub Release එකක් publish කරනවා.
+3. `PoruwaCut_<ver>.ccx` සහ `PoruwaCut_Setup_<ver>.exe` හදලා `v<ver>` GitHub Release එකක් publish කරනවා.
+
+Progress බලන්න: GitHub repo › **Actions** tab.
 
 Install කරලා තියෙන හැම PC එකක්ම ඒ Release එක දැකලා update එක offer කරනවා.
 Update check කරන repo එක: `engine/__init__.py` › `UPDATE_REPO` (repo එක **public** වෙන්න ඕන).

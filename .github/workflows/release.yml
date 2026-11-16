@@ -1,16 +1,15 @@
-# Builds PoruwaCut_Setup_<ver>.exe + PoruwaCut_<ver>.ccx on Windows and publishes a GitHub Release.
-# Release = push a tag:   git tag v0.2.0 && git push origin v0.2.0
+# Builds PoruwaCut_Setup_<ver>.exe + PoruwaCut_<ver>.ccx on Windows and publishes GitHub Release v<ver>.
+# New release = change the number in VERSION (e.g. 0.2.0) and push to main.
+# (a pushed tag v0.2.0 works too). If Release v<ver> already exists, it only builds, no publish.
 # Installed copies see the new Release and offer "Update කරන්න" in the Premiere panel.
 name: release
 
 on:
   push:
+    branches: [main]
+    paths: ["VERSION", ".github/workflows/release.yml"]
     tags: ["v*"]
   workflow_dispatch:
-    inputs:
-      version:
-        description: "Version to build (test build, no release)"
-        default: "0.0.1"
 
 permissions:
   contents: write
@@ -29,8 +28,19 @@ jobs:
         id: ver
         shell: pwsh
         run: |
-          $v = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "${{ inputs.version }}" }
+          $v = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { (Get-Content VERSION -Raw).Trim() }
           python build/stamp_version.py $v
+
+      - name: Release already published?
+        id: exists
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "v${{ steps.ver.outputs.version }}" --repo "${{ github.repository }}" *> $null
+          if ($LASTEXITCODE -eq 0) { "exists=true" >> $env:GITHUB_OUTPUT; Write-Host "Release exists - build only" }
+          else { "exists=false" >> $env:GITHUB_OUTPUT }
+          $global:LASTEXITCODE = 0
 
       - name: Python dependencies
         run: |
@@ -111,9 +121,12 @@ jobs:
             dist/PoruwaCut_*.ccx
 
       - name: Publish GitHub Release
-        if: github.ref_type == 'tag'
+        if: steps.exists.outputs.exists == 'false'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: PoruwaCut ${{ steps.ver.outputs.version }}
           files: |
             Output/PoruwaCut_Setup_*.exe
             dist/PoruwaCut_*.ccx
