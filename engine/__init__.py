@@ -11,4 +11,4 @@ except Exception:  # source checkout: read ../VERSION
         __version__ = "0.0.0-dev"
 
 # GitHub repository whose Releases carry PoruwaCut_Setup_<ver>.exe (used for auto-update)
-UPDATE_REPO = "eapasindu-sudo/PoruwaCut"
+UPDATE_REPO = "eapasindu-sudo/poruwacut"
