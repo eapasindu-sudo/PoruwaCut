@@ -159,37 +159,70 @@ class Handler(BaseHTTPRequestHandler):
         self._send(*api("POST", self.path, body))
 
 
-def _ipc_loop():
-    """File-based IPC: Premiere's UXP sandbox sometimes blocks http:// fetches, so the panel can
-    drop req_<id>.json into IPC_DIR and read back res_<id>.json instead."""
+def _uxp_storage_roots():
+    if os.name == "nt":
+        return [os.path.join(os.environ.get("APPDATA", ""), "Adobe", "UXP", "PluginsStorage")]
+    return [os.path.expanduser("~/Library/Application Support/Adobe/UXP/PluginsStorage")]
+
+
+def _panel_dirs(extra_roots=()):
+    """Plugin-data folders of the PoruwaCut UXP panel (one per Premiere version)."""
+    found = []
+    for base in list(_uxp_storage_roots()) + list(extra_roots):
+        if not os.path.isdir(base):
+            continue
+        for root, dirs, files in os.walk(base):
+            if root[len(base):].count(os.sep) > 8:
+                dirs[:] = []
+                continue
+            if "poruwacut_panel.json" in files or (
+                    "poruwacut" in root.lower() and os.path.basename(root).lower() == "plugindata"):
+                found.append(root)
+    return found
+
+
+def _serve_dir(d):
+    import glob
+    for req in glob.glob(os.path.join(d, "req_*.json")):
+        rid = os.path.basename(req)[4:-5]
+        try:
+            with open(req, encoding="utf-8") as f:
+                r = json.load(f)
+            os.remove(req)
+        except (OSError, ValueError):
+            continue  # still being written
+        try:
+            code, obj = api(r.get("method", "GET"), r.get("path", ""), r.get("body"))
+        except Exception as e:
+            code, obj = 500, {"error": str(e)}
+        tmp = os.path.join(d, f"res_{rid}.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"status": code, "body": obj}, f, ensure_ascii=False, default=float)
+        os.replace(tmp, os.path.join(d, f"res_{rid}.json"))
+
+
+def _ipc_loop(extra_roots=()):
+    """File-based IPC: Premiere's UXP sandbox sometimes blocks http:// fetches, so the panel
+    drops req_<id>.json into its plugin-data folder and reads back res_<id>.json."""
     import glob
     import time
     os.makedirs(IPC_DIR, exist_ok=True)
     with open(os.path.join(IPC_DIR, "engine.json"), "w", encoding="utf-8") as f:
         json.dump({"version": __version__, "pid": os.getpid()}, f)
+    dirs, last_scan = [IPC_DIR], 0.0
     while True:
         try:
-            for req in glob.glob(os.path.join(IPC_DIR, "req_*.json")):
-                rid = os.path.basename(req)[4:-5]
-                try:
-                    with open(req, encoding="utf-8") as f:
-                        r = json.load(f)
-                    os.remove(req)
-                except (OSError, ValueError):
-                    continue  # still being written
-                try:
-                    code, obj = api(r.get("method", "GET"), r.get("path", ""), r.get("body"))
-                except Exception as e:
-                    code, obj = 500, {"error": str(e)}
-                tmp = os.path.join(IPC_DIR, f"res_{rid}.tmp")
-                with open(tmp, "w", encoding="utf-8") as f:
-                    json.dump({"status": code, "body": obj}, f, ensure_ascii=False, default=float)
-                os.replace(tmp, os.path.join(IPC_DIR, f"res_{rid}.json"))
-            # clean responses nobody picked up
             now = time.time()
-            for old in glob.glob(os.path.join(IPC_DIR, "res_*.json")):
-                if now - os.path.getmtime(old) > 120:
-                    os.remove(old)
+            if now - last_scan > 3:
+                new = [IPC_DIR] + _panel_dirs(extra_roots)
+                if set(new) != set(dirs):
+                    print("IPC folders:", new, flush=True)
+                dirs, last_scan = new, now
+            for d in dirs:
+                _serve_dir(d)
+                for old in glob.glob(os.path.join(d, "res_*.json")):
+                    if now - os.path.getmtime(old) > 120:
+                        os.remove(old)
         except Exception as e:
             print("IPC error:", e, flush=True)
         time.sleep(0.25)

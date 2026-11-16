@@ -6,55 +6,51 @@ const ppro = require("premierepro");
 const ENGINES = ["http://127.0.0.1:7788", "http://localhost:7788"];
 const PANEL_VERSION = "__PORUWACUT_VERSION__"; // stamped by build/make_ccx.py
 const $ = (id) => document.getElementById(id);
+window.addEventListener("error", (ev) => { try { log("JS error: " + (ev.message || ev.error), "bad"); } catch (e) {} });
+window.addEventListener("unhandledrejection", (ev) => { try { log("Error: " + (ev.reason && ev.reason.message || ev.reason), "bad"); } catch (e) {} });
 
 let seqData = null; // what we read from Premiere
 
 // ---------- engine transport: HTTP first, file-based IPC fallback ----------
-// Premiere's UXP sandbox can refuse http:// fetches. The engine also watches
-// %LOCALAPPDATA%\\PoruwaCut\\ipc for req_<id>.json and answers with res_<id>.json.
-const fs = require("fs");
+// Premiere's UXP sandbox can refuse http:// fetches. Fallback: the panel writes req_<id>.json
+// into its own UXP plugin-data folder (always writable, no extra permission) and the engine,
+// which scans %APPDATA%\\Adobe\\UXP\\PluginsStorage for PoruwaCut folders, answers with res_<id>.json.
 let transport = null;        // "http" | "file"
 let engineBase = ENGINES[0];
 let lastNetErr = "";
-
-function ipcDir() {
-  const os = require("os");
-  const home = os.homedir();
-  return os.platform() === "win32" ? home + "\\AppData\\Local\\PoruwaCut\\ipc" : home + "/.poruwacut/ipc";
-}
-let fsStyle = null; // which path spelling UXP fs accepts on this machine
-function fsPaths(p) {
-  const fwd = p.replace(/\\/g, "/");
-  const all = [p, "file:" + (fwd.startsWith("/") ? "" : "/") + fwd, "file://" + (fwd.startsWith("/") ? "" : "/") + fwd];
-  return fsStyle === null ? all : [all[fsStyle]];
-}
-async function fsTry(fn, p) {
-  let err;
-  const cands = fsPaths(p);
-  for (let i = 0; i < cands.length; i++) {
-    try { const r = await fn(cands[i]); if (fsStyle === null) fsStyle = fsPaths(p).indexOf(cands[i]); return r; }
-    catch (e) { err = e; }
-  }
-  throw err;
-}
+let dataFolder = null;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+async function ipcFolder() {
+  if (!dataFolder) {
+    const lfs = require("uxp").storage.localFileSystem;
+    dataFolder = await lfs.getDataFolder();
+    try {
+      const f = await dataFolder.createFile("poruwacut_panel.json", { overwrite: true });
+      await f.write(JSON.stringify({ panel: PANEL_VERSION, path: dataFolder.nativePath }));
+    } catch (e) {}
+  }
+  return dataFolder;
+}
+
 async function fileCall(method, path, body, timeoutMs) {
+  const dir = await ipcFolder();
   const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-  const dir = ipcDir();
-  const req = JSON.stringify({ method, path, body: body || null });
-  await fsTry((q) => fs.writeFile(q, req, { encoding: "utf-8" }), dir + (dir.includes("\\") ? "\\" : "/") + "req_" + id + ".json");
-  const res = dir + (dir.includes("\\") ? "\\" : "/") + "res_" + id + ".json";
+  const tmp = await dir.createFile("req_" + id + ".part", { overwrite: true });
+  await tmp.write(JSON.stringify({ method, path, body: body || null }));
+  try { await tmp.moveTo(dir, { newName: "req_" + id + ".json", overwrite: true }); }
+  catch (e) { const f = await dir.createFile("req_" + id + ".json", { overwrite: true }); await f.write(JSON.stringify({ method, path, body: body || null })); try { await tmp.delete(); } catch (e2) {} }
   const t0 = Date.now();
   while (Date.now() - t0 < timeoutMs) {
-    await sleep(200);
-    try {
-      const txt = await fsTry((q) => fs.readFile(q, { encoding: "utf-8" }), res);
-      try { await fsTry((q) => fs.unlink(q), res); } catch (e) {}
-      return JSON.parse(txt).body;
-    } catch (e) { /* not there yet */ }
+    await sleep(250);
+    let entry = null;
+    try { entry = await dir.getEntry("res_" + id + ".json"); } catch (e) { continue; }
+    const txt = await entry.read();
+    try { await entry.delete(); } catch (e) {}
+    return JSON.parse(txt).body;
   }
-  throw new Error("engine did not answer (file link)");
+  try { const r = await dir.getEntry("req_" + id + ".json"); await r.delete(); } catch (e) {}
+  throw new Error("engine did not answer via " + dir.nativePath);
 }
 
 async function httpCall(base, method, path, body) {
@@ -87,7 +83,7 @@ function log(msg, cls) {
 
 async function ping() {
   try {
-    const p = await call("GET", "/api/ping", null, 4000);
+    const p = await call("GET", "/api/ping", null, transport === "file" ? 4000 : 9000);
     $("eng").textContent = `● v${p.version} · GPU ${p.nvdec ? "ON" : "OFF"} · faces ${p.face_detector} · ${transport}`;
     $("eng").className = "ok";
     if (!updateChecked) { updateChecked = true; checkUpdate(); }
