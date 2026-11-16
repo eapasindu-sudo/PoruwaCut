@@ -21,7 +21,7 @@ METRICS = ["sharp", "bright", "clip_hi", "clip_lo", "dx", "dy", "phase_resp",
 
 ANALYSIS_WIDTH = 480
 SMALL_WIDTH = 160
-VERSION = "2"
+VERSION = "3"
 CHUNK_LEN = 60.0  # seconds per analysed segment (smaller = smoother live progress)
 
 
@@ -39,6 +39,7 @@ def _analyze_chunk(path: str, start: float, length: float, fps: float, use_gpu: 
     det = FaceDetector(use_gpu)
     prev_small = None
     win = None
+    last_face = None
     for t, frame in iter_frames(path, start, length, fps, ANALYSIS_WIDTH, use_gpu):
         k = int(round((t - start) * fps))
         if k >= n:
@@ -72,8 +73,9 @@ def _analyze_chunk(path: str, start: float, length: float, fps: float, use_gpu: 
             out["local_change"][k] = float(np.abs(warped[4:-4, 4:-4] - small[4:-4, 4:-4]).mean() / 255.0)
         prev_small = small
 
-        faces = det.detect(frame)
-        c, area, central, score, pair = face_features(faces, w, h)
+        if k % 2 == 0 or last_face is None:  # faces change slowly: detect on every 2nd frame
+            last_face = face_features(det.detect(frame), w, h)
+        c, area, central, score, pair = last_face
         out["faces"][k], out["face_area"][k] = c, area
         out["face_central"][k], out["face_score"][k] = central, score
         out["pair_central"][k] = pair

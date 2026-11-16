@@ -140,8 +140,18 @@ async function checkUpdate(manual) {
 
 async function installUpdate() {
   $("updbtn").disabled = true;
+  // save the open project first: the update closes Premiere and opens it again afterwards
+  let reopen = "";
   try {
-    const r = await call("POST", "/api/update/install", {});
+    const project = await ppro.Project.getActiveProject();
+    if (project) {
+      const ok = await project.save();
+      reopen = project.path || "";
+      log(ok ? "Project එක save කළා ✔" : "Project save වුණේ නැද්ද කියලා සැකයි", ok ? "ok" : "warn");
+    }
+  } catch (e) { log("Save: " + e, "warn"); }
+  try {
+    const r = await call("POST", "/api/update/install", { close_premiere: true, reopen });
     if (r.status === "error") { log(r.message, "bad"); $("updbtn").disabled = false; return; }
   } catch (e) { log("Update පටන් ගන්න බැරි වුණා: " + e, "bad"); $("updbtn").disabled = false; return; }
   const poll = async () => {
@@ -152,7 +162,7 @@ async function installUpdate() {
       $("updnotes").textContent = ""; $("updbtn").style.display = "none";
       return;
     }
-    if (s.status === "downloading") $("updtxt").textContent = `Download වෙනවා... ${Math.round(s.progress * 100)}%`;
+    if (s.status === "downloading") $("updtxt").textContent = `Download වෙනවා... ${Math.round(s.progress * 100)}% · ඉවර වුණාම Premiere close වෙලා update වෙලා ආයෙ open වෙනවා`;
     else if (s.status === "installing") $("updtxt").textContent = s.message;
     if (s.status === "error") { log(s.message, "bad"); $("updbtn").disabled = false; return; }
     setTimeout(poll, 700);
@@ -298,36 +308,86 @@ async function uniqueName(project, base) {
   return base + " " + Date.now();
 }
 
-// Live applier: razors new cut times on the target tracks, and (stacked) enables the chosen camera
-function makeApplier(project, target, kind, trackOfCam, rangeT0, rangeT1) {
-  const editor = ppro.SequenceEditor.getEditor(target);
-  const V = ppro.Constants.MediaType.VIDEO;
-  const razorTracks = kind === "multicam" ? [0] : trackOfCam.slice();
+const EPS = 0.02;
+async function itemsOf(track) {
+  const out = [];
+  for (const it of track.getTrackItems(ppro.Constants.TrackItemType.CLIP, false)) {
+    out.push({ it, a: (await it.getStartTime()).seconds, b: (await it.getEndTime()).seconds });
+  }
+  return out.sort((x, y) => x.a - y.a);
+}
+
+// ---------- cutting a track at time t ----------
+// Premiere 27.1+ has a razor action. 26.x does not, so there we split by: trim the clip, clone it
+// into the gap that the trim left, and trim the clone to fill the gap exactly.
+function hasNativeRazor(seq) {
+  try { return typeof ppro.SequenceEditor.getEditor(seq).createRazorTrackAction === "function"; }
+  catch (e) { return false; }
+}
+
+async function emulatedRazor(project, seq, vIndex, t) {
+  const editor = ppro.SequenceEditor.getEditor(seq);
+  const track = await seq.getVideoTrack(vIndex);
+  const hit = (await itemsOf(track)).find((x) => x.a < t - EPS && t + EPS < x.b);
+  if (!hit) return false;
+  const { it, a, b } = hit;
+  const inp = (await it.getInPoint()).seconds;
+  const left = t - a, right = b - t;
+  if (left >= right) {
+    // original keeps the right part [t, b]; the clone fills [a, t]
+    transact(project, "PoruwaCut cut", () => [it.createSetStartAction(tt(t))]);
+    if (Math.abs((await it.getInPoint()).seconds - (inp + left)) > 0.002)
+      transact(project, "PoruwaCut cut", () => [it.createSetInPointAction(tt(inp + left))]);
+    transact(project, "PoruwaCut cut", () => [editor.createCloneTrackItemAction(it, tt(-left), 0, 0, true, false)]);
+    const c = (await itemsOf(track)).find((x) => Math.abs(x.a - a) < EPS && x.it !== it);
+    if (!c) throw new Error(`clone not found at ${a.toFixed(2)}s`);
+    transact(project, "PoruwaCut cut", () => [c.it.createSetEndAction(tt(t))]);
+    transact(project, "PoruwaCut cut", () => [c.it.createSetInPointAction(tt(inp)), c.it.createSetOutPointAction(tt(inp + left))]);
+  } else {
+    // original keeps the left part [a, t]; the clone fills [t, b]
+    transact(project, "PoruwaCut cut", () => [it.createSetEndAction(tt(t))]);
+    transact(project, "PoruwaCut cut", () => [editor.createCloneTrackItemAction(it, tt(left), 0, 0, true, false)]);
+    const c = (await itemsOf(track)).find((x) => Math.abs(x.a - t) < EPS && x.it !== it);
+    if (!c) throw new Error(`clone not found at ${t.toFixed(2)}s`);
+    transact(project, "PoruwaCut cut", () => [c.it.createSetEndAction(tt(b))]);
+    transact(project, "PoruwaCut cut", () => [c.it.createSetInPointAction(tt(inp + left)), c.it.createSetOutPointAction(tt(inp + (b - a)))]);
+  }
+  return true;
+}
+
+async function razorTracks(project, seq, tracks, t, native) {
+  if (native) {
+    const editor = ppro.SequenceEditor.getEditor(seq);
+    const V = ppro.Constants.MediaType.VIDEO;
+    transact(project, "PoruwaCut cut", () => tracks.map((ti) => editor.createRazorTrackAction(V, ti, tt(t), false, V)));
+    return;
+  }
+  for (const ti of tracks) await emulatedRazor(project, seq, ti, t);
+}
+
+// Live applier for "Manual cutting": cut every camera track and enable only the chosen camera
+function makeStackedApplier(project, target, trackOfCam, rangeT0, rangeT1) {
+  const native = hasNativeRazor(target);
+  log(native ? "Razor: Premiere razor API" : "Razor: clone + trim (Premiere 26 / 27.0)", "mute");
   const done = new Set();
   let enabledUntil = rangeT0;
-
-  function razorAt(times) {
-    const todo = times.filter((t) => !done.has(t.toFixed(3)));
-    if (!todo.length) return 0;
-    transact(project, "PoruwaCut cuts", () => {
-      const acts = [];
-      for (const t of todo) for (const ti of razorTracks) acts.push(editor.createRazorTrackAction(V, ti, tt(t), false, V));
-      return acts;
-    });
-    todo.forEach((t) => done.add(t.toFixed(3)));
-    return todo.length;
+  async function cutAt(times) {
+    let n = 0;
+    for (const t of times) {
+      const key = t.toFixed(3);
+      if (done.has(key) || t <= 0.001) continue;
+      await razorTracks(project, target, trackOfCam, t, native);
+      done.add(key); n++;
+    }
+    return n;
   }
-
   async function enablePieces(segments, until) {
-    if (kind !== "stacked") return;
     const camAt = (t) => { for (const s of segments) if (t >= s.start - 1e-3 && t < s.end + 1e-3) return s.cam; return null; };
     const acts = [];
     let processed = enabledUntil;
     for (let c = 0; c < trackOfCam.length; c++) {
       const track = await target.getVideoTrack(trackOfCam[c]);
-      const items = track.getTrackItems(ppro.Constants.TrackItemType.CLIP, false);
-      for (const it of items) {
-        const a = (await it.getStartTime()).seconds, b = (await it.getEndTime()).seconds;
+      for (const { it, a, b } of await itemsOf(track)) {
         if (b <= enabledUntil + 1e-3 || a < rangeT0 - 1e-3 || b > until + 1e-3) continue;
         const chosen = camAt((a + b) / 2);
         if (chosen === null) continue;
@@ -339,21 +399,49 @@ function makeApplier(project, target, kind, trackOfCam, rangeT0, rangeT1) {
       }
     }
     if (acts.length) transact(project, "PoruwaCut angles", () => acts);
-    enabledUntil = processed; // only pieces that were fully inside the committed range
+    enabledUntil = processed;
   }
-
   return {
     async apply(segments, until, final) {
-      const cuts = [];
-      if (!done.size) cuts.push(rangeT0);
+      const cuts = [rangeT0];
       for (let i = 1; i < segments.length; i++) cuts.push(segments[i].start);
       if (final) cuts.push(rangeT1);
-      const n = razorAt(cuts.filter((t) => t > 0.001));
+      await cutAt(cuts);
       await enablePieces(segments, until);
-      return n;
     },
     count: () => Math.max(0, done.size - 1),
   };
+}
+
+// ---------- live strip in the panel ----------
+const CAM_COLORS = ["#d4a24c", "#3fa7d6", "#e05d9e", "#5fb37a", "#a77de0", "#e07b39"];
+function renderStrip(segments, t0, t1, until) {
+  const strip = $("strip");
+  strip.innerHTML = "";
+  const total = Math.max(0.001, t1 - t0);
+  for (const s of segments) {
+    const d = document.createElement("div");
+    d.style.width = (Math.max(0, s.end - s.start) / total * 100).toFixed(3) + "%";
+    d.style.height = "16px";
+    d.style.backgroundColor = CAM_COLORS[s.cam % CAM_COLORS.length];
+    d.style.borderRight = "1px solid #1b1b1b";
+    d.title = `${fmt(s.start - t0)} – ${fmt(s.end - t0)} · Cam ${s.cam + 1}`;
+    strip.appendChild(d);
+  }
+  const rest = document.createElement("div");
+  rest.style.flex = "1"; rest.style.height = "16px"; rest.style.backgroundColor = "#1b1b1b";
+  strip.appendChild(rest);
+  $("striplbl").textContent = `Cuts ${Math.max(0, segments.length - 1)} · ${fmt((until || t0) - t0)} / ${fmt(total)}`;
+}
+function renderLegend(cams) {
+  $("legend").innerHTML = "";
+  cams.forEach((c, i) => {
+    const sw = document.createElement("span");
+    sw.textContent = "■ Cam " + (i + 1);
+    sw.style.color = CAM_COLORS[i % CAM_COLORS.length];
+    sw.style.marginRight = "10px";
+    $("legend").appendChild(sw);
+  });
 }
 
 // ---------- the main flow ----------
@@ -377,14 +465,18 @@ async function runAutoEdit() {
   const kind = $("etype").value;
   const range = $("range").value === "inout" ? [sd.inT, sd.outT] : [0, sd.endT];
   const event = $("event").value || "auto";
-  const evName = $("event").selectedOptions && $("event").selectedOptions[0] ? $("event").selectedOptions[0].textContent.split("  ·  ")[0] : event;
+  const opt = $("event").selectedOptions && $("event").selectedOptions[0];
+  const evName = opt ? opt.textContent.split("  ·  ")[0] : event;
   showProgress("prepare", 0, null);
+  renderLegend(sd.cams);
+  renderStrip([], range[0], range[1], range[0]);
 
   // 1) target sequence
-  let target, nest = null;
+  let target = null, nest = null, applier = null;
   if (kind === "stacked") {
     target = await cloneSequence(project, sd.seq, await uniqueName(project, `${sd.name} - PoruwaCut ${evName}`));
     await project.openSequence(target);
+    applier = makeStackedApplier(project, target, sd.cams.map((c) => c.track), range[0], range[1]);
     log(`"${target.name}" හැදුවා. Cuts live වැටෙනවා…`, "ok");
   } else {
     nest = await cloneSequence(project, sd.seq, await uniqueName(project, `${sd.name} - Multicam Source`));
@@ -394,11 +486,8 @@ async function runAutoEdit() {
     target = await project.createSequenceFromMedia(eName, [nestItem]);
     if (!target) target = await findNewSequence(project, before);
     if (!target) throw new Error("multicam edit sequence හදන්න බැරි වුණා");
-    await project.openSequence(target);
-    log(`Nest: "${nest.name}" · Edit: "${target.name}". Cuts live වැටෙනවා…`, "ok");
+    log(`Nest: "${nest.name}" · Edit: "${target.name}". Cuts පහළ strip එකේ live පේනවා, ඉවර වුණාම timeline එකට.`, "ok");
   }
-  const trackOfCam = sd.cams.map((c) => c.track);
-  const applier = makeApplier(project, target, kind, trackOfCam, range[0], range[1]);
 
   // 2) engine job
   const body = {
@@ -418,42 +507,54 @@ async function runAutoEdit() {
     for (; shown < j.log.length; shown++) log(j.log[shown], j.log[shown].startsWith("ERROR") ? "bad" : "");
     if (j.segments && j.segments.length !== lastSegCount) {
       lastSegCount = j.segments.length;
-      await applier.apply(j.segments, j.committed_until || range[0], false);
-      $("cutsline").textContent = `Timeline එකේ cuts: ${applier.count()}  ·  ${fmt((j.committed_until || range[0]) - range[0])} / ${fmt(range[1] - range[0])}`;
+      renderStrip(j.segments, range[0], range[1], j.committed_until || range[0]);
+      if (applier) {
+        try { await applier.apply(j.segments, j.committed_until || range[0], false); }
+        catch (e) { log("Timeline cut: " + (e && e.message || e), "bad"); applier = null; log("Live cuts නවත්වනවා. ඉවර වුණාම XML එකක් import කරනවා.", "warn"); }
+      }
     }
     if (j.status === "error") return;
     if (j.status === "done") { await finish(project, kind, target, nest, sd, applier, j.result); return; }
   }
 }
 
+async function addDeadMarkers(project, seq, result) {
+  if (!result.dead || !result.dead.length) return;
+  try {
+    const markers = await ppro.Markers.getMarkers(seq);
+    transact(project, "PoruwaCut markers", () => result.dead.map((d) =>
+      markers.createAddMarkerAction("CHECK – කැමරා සියල්ල දුර්වලයි", "Comment", tt(d.start), tt(Math.max(0.1, d.end - d.start)), "PoruwaCut")));
+  } catch (e) { log("Markers: " + e, "warn"); }
+}
+
 async function finish(project, kind, target, nest, sd, applier, result) {
   showProgress("finish", 0.99, null);
-  await applier.apply(result.segments, result.range[1], true);
-  // markers on stretches where every camera was weak
-  try {
-    const markers = await ppro.Markers.getMarkers(target);
-    if (result.dead && result.dead.length) {
-      transact(project, "PoruwaCut markers", () => result.dead.map((d) =>
-        markers.createAddMarkerAction("CHECK – කැමරා සියල්ල දුර්වලයි", "Comment", tt(d.start), tt(Math.max(0.1, d.end - d.start)), "PoruwaCut")));
-    }
-  } catch (e) { log("Markers: " + e, "warn"); }
+  renderStrip(result.segments, result.range[0], result.range[1], result.range[1]);
   const s = result.stats;
   if (kind === "stacked") {
+    if (applier) {
+      await applier.apply(result.segments, result.range[1], true);
+      await addDeadMarkers(project, target, result);
+    } else if (result.xml) {
+      await project.importFiles([result.xml], true, null, false);
+      log("XML sequence එක import කළා: " + result.xml, "ok");
+    }
     showProgress("done", 1, null);
     log(`✔ ඉවරයි · cuts ${s.cuts} · සාමාන්‍ය shot ${s.avg_shot}s`, "ok");
     log("Angle එකක් මාරු කරන්න: කෑල්ල select කරලා Shift+E (enable/disable).", "ok");
     return;
   }
-  // multicam: save, let the engine turn every piece into a multicam clip, open the copy
-  log("Multicam angles සෙට් කරනවා (project copy එකක)…");
+  // multicam: save, the engine cuts the nest inside a project copy, open that copy
+  await addDeadMarkers(project, target, result);
+  log("Multicam cuts project එකට ලියනවා…");
   const saved = await project.save();
   if (!saved) log("Project save වුණේ නැද්ද කියලා සැකයි – දිගටම යනවා", "warn");
   const r = await call("POST", "/api/prproj/multicam", {
     project_path: project.path, edit_seq: target.name, nest_seq: nest.name,
     segments: result.segments, cam_tracks: sd.cams.map((c) => c.track),
-  }, 60000);
-  if (r.error) { log("Multicam patch අසාර්ථකයි: " + r.error, "bad"); return; }
-  log(`Multicam pieces ${r.report.set}/${r.report.pieces} සෙට් කළා → ${r.path}`, "ok");
+  }, 120000);
+  if (r.error) { log("Multicam cuts අසාර්ථකයි: " + r.error, "bad"); return; }
+  log(`Multicam pieces ${r.report.multicam} හැදුවා → ${r.path}`, "ok");
   const opened = await ppro.Project.open(r.path);
   try {
     const seqs = await opened.getSequences();
@@ -461,20 +562,62 @@ async function finish(project, kind, target, nest, sd, applier, result) {
     if (e) await opened.openSequence(e);
   } catch (e) {}
   showProgress("done", 1, null);
-  log(`✔ ඉවරයි · cuts ${s.cuts} · සාමාන්‍ය shot ${s.avg_shot}s · Program Monitor එකේ Multi-Camera view (Shift+0) එකෙන් angles මාරු කරන්න පුළුවන්.`, "ok");
-  log("ඔබේ original project එක වෙනස් වුණේ නැහැ (nest + edit sequence විතරක් එකතු වුණා). PoruwaCut copy එක අලුත් tab එකක open වුණා.", "mute");
+  log(`✔ ඉවරයි · cuts ${s.cuts} · සාමාන්‍ය shot ${s.avg_shot}s · angles මාරු කරන්න Program Monitor › Multi-Camera (Shift+0).`, "ok");
+  log("ඔබේ original project එකට nest + edit sequence විතරක් එකතු වුණා. Multicam edit එක තියෙන්නේ අලුතින් open වුණු PoruwaCut copy එකේ.", "mute");
+}
+
+// ---------- razor test (Manual cutting on Premiere 26 / 27.0) ----------
+async function razorTest() {
+  if (busy) return;
+  busy = true;
+  try {
+    const project = await ppro.Project.getActiveProject();
+    const seq = project && (await project.getActiveSequence());
+    if (!seq) { log("Test එකට sequence එකක් open කරන්න.", "bad"); return; }
+    const test = await cloneSequence(project, seq, await uniqueName(project, `${seq.name} - PoruwaCut Razor Test`));
+    await project.openSequence(test);
+    const native = hasNativeRazor(test);
+    const v1 = await test.getVideoTrack(0);
+    const before = await itemsOf(v1);
+    if (!before.length) { log("V1 එකේ clip එකක් නැහැ.", "bad"); return; }
+    const aCount = async () => { let n = 0; const c = await test.getAudioTrackCount(); for (let i = 0; i < c; i++) n += (await itemsOf(await test.getAudioTrack(i))).length; return n; };
+    const audioBefore = await aCount();
+    const { a, b } = before[0];
+    const inp0 = (await before[0].it.getInPoint()).seconds;
+    let fps = 25;
+    try { const tb = parseFloat(await test.getTimebase()); if (tb > 0) fps = TICKS / tb; } catch (e) {}
+    const pts = [a + (b - a) * 0.25, a + (b - a) * 0.5, a + (b - a) * 0.8].map((t) => Math.round(t * fps) / fps);
+    log(`Razor test (${native ? "Premiere razor" : "clone + trim"}): V1 clip ${fmt(a)}–${fmt(b)} · cuts ${pts.map((t) => fmt(t)).join(", ")}`);
+    for (const t of pts) await razorTracks(project, test, [0], t, native);
+    const after = await itemsOf(v1);
+    let ok = after.length === before.length + 3;
+    for (const p of after.slice(0, 4)) {
+      const ip = (await p.it.getInPoint()).seconds;
+      const expect = inp0 + (p.a - a);
+      const good = Math.abs(ip - expect) < 0.05;
+      ok = ok && good;
+      log(`  ${fmt(p.a)}–${fmt(p.b)} · source in ${ip.toFixed(2)}s ${good ? "✔" : "✘ (expected " + expect.toFixed(2) + ")"}`, good ? "ok" : "bad");
+    }
+    const audioAfter = await aCount();
+    if (audioAfter !== audioBefore) { ok = false; log(`  Audio clips ${audioBefore} → ${audioAfter}: audio වලටත් බලපෑවා ✘`, "bad"); }
+    else log(`  Audio clips වෙනස් වුණේ නැහැ ✔`, "ok");
+    log(ok ? "✔ Razor test සාර්ථකයි. Manual cutting live වැඩ කරයි." : "✘ Razor test අසාර්ථකයි. මේ log එකේ screenshot එකක් එවන්න.", ok ? "ok" : "bad");
+    log(`Test sequence: "${test.name}" (බලලා delete කරන්න).`, "mute");
+  } catch (e) { log("Razor test error: " + (e && e.message || e), "bad"); }
+  finally { busy = false; }
 }
 
 // ---------- wiring ----------
 const HINTS = {
-  multicam: "කැමරා nest කරලා multicam enable කරලා angle cuts. ඉවර වුණාම project copy එකක් open වෙනවා.",
-  stacked: "කැමරා track වෙන වෙනම. Cuts live වැටෙනවා, angle මාරු කරන්න Shift+E.",
+  multicam: "කැමරා nest කරලා multicam angle cuts. Cuts panel strip එකේ live පේනවා, ඉවර වුණාම project copy එකක් open වෙනවා.",
+  stacked: "කැමරා track වෙන වෙනම. Cuts timeline එකේ live වැටෙනවා, angle මාරු කරන්න Shift+E.",
 };
 $("etype").addEventListener("change", () => { $("etypehint").textContent = HINTS[$("etype").value]; });
 $("etypehint").textContent = HINTS.multicam;
 $("updbtn").addEventListener("click", () => installUpdate());
 $("chk").addEventListener("click", () => checkUpdate(true));
 $("read").addEventListener("click", () => readSequence().catch((e) => log("Error: " + e, "bad")));
+$("rtest").addEventListener("click", () => razorTest());
 $("go").addEventListener("click", () => autoEdit());
 $("ver").textContent = "PoruwaCut v" + PANEL_VERSION;
 ping().then((ok) => { if (ok) checkUpdate(false); });

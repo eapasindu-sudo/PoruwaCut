@@ -110,7 +110,7 @@ def _run_edit(job, body):
             ov = {k: o.get(k) for k in ("min_shot", "max_shot", "switch_cost", "stay_cost")}
             if o.get("cam_bias"):
                 ov["cam_bias"] = [float(x) for x in o["cam_bias"]]
-            res = run(p, mode, out_dir, ov, float(o.get("fps", 5)), not o.get("cpu", False),
+            res = run(p, mode, out_dir, ov, (float(o["fps"]) if o.get("fps") else None), not o.get("cpu", False),
                       int(o.get("workers", 2)), o.get("layout", "stacked"), bool(o.get("remove_dead", False)),
                       log=log, progress=_progress(job), on_segments=_on_segments(job))
             res.pop("beats", None)
@@ -147,15 +147,16 @@ def api(method: str, path: str, body: dict | None = None):
         if path == "/api/update/install":
             if LOCK.locked():
                 return 409, {"status": "error", "message": "Edit එකක් run වෙනවා. ඉවර වුණාම update කරන්න."}
-            return 200, dict(updater.start_install())
+            return 200, dict(updater.start_install(close_premiere=bool(body.get("close_premiere")),
+                                                   reopen=body.get("reopen")))
         if path == "/api/prproj/multicam":
             import time as _t
             from . import prproj
             src = body["project_path"]
             base, _ = os.path.splitext(src)
             dst = body.get("out_path") or f"{base} - PoruwaCut {_t.strftime('%H%M%S')}.prproj"
-            rep = prproj.patch_multicam(src, dst, body["edit_seq"], body["nest_seq"], body["segments"],
-                                        body.get("cam_tracks"), float(body.get("nest_offset", 0.0)))
+            rep = prproj.build_multicam_cuts(src, dst, body["edit_seq"], body["nest_seq"], body["segments"],
+                                             body.get("cam_tracks"))
             return 200, {"path": dst, "report": rep}
         if path == "/api/quit":
             threading.Timer(0.5, lambda: os._exit(0)).start()

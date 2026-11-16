@@ -37,6 +37,7 @@ class EventPreset:
     dead_threshold: float = -1.2
     dead_min_sec: float = 2.0
     smooth_sec: float = 0.6
+    analysis_fps: float = 5.0     # frames analysed per second of footage (lower = faster)
     cam_bias: list = field(default_factory=list)
 
     def to_dict(self):
@@ -46,7 +47,7 @@ class EventPreset:
 _DANCE = dict(grid="beats", min_shot=1.0, max_shot=5.0, switch_cost=0.35, stay_cost=1.5,
               w_shake=0.9, w_pan=0.2, shake_ref=0.02, pan_limit=1.0, rhythm_forgive=0.9,
               w_face=0.6, w_couple=1.0, smooth_sec=0.4, dead_threshold=-1.6, dead_min_sec=1.5)
-_CALM = dict(grid="phrases", min_shot=3.0, max_shot=10.0, switch_cost=0.9, stay_cost=2.0,
+_CALM = dict(grid="phrases", analysis_fps=4.0, min_shot=3.0, max_shot=10.0, switch_cost=0.9, stay_cost=2.0,
              w_shake=1.4, w_face=1.2, w_couple=1.4)
 
 PRESETS: dict[str, EventPreset] = {p.id: p for p in [

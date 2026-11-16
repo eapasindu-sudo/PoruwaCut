@@ -44,7 +44,7 @@
   <div class="sec">
     <b>1 · Sequence</b>
     <div class="mute" style="margin-bottom:6px">Sync කරපු sequence එක open කරන්න (එක් කැමරාවකට එක video track එකක්).</div>
-    <button id="read">Sequence කියවන්න</button>
+    <button id="read">Sequence කියවන්න</button> <button id="rtest" title="Manual cutting එකේ cut කිරීම ඔබේ Premiere එකේ වැඩද කියලා පොඩි test sequence එකක බලනවා">Razor test</button>
     <div id="seqinfo" class="mute" style="margin-top:6px"></div>
     <div id="tracks"></div>
   </div>
@@ -70,7 +70,8 @@
     <div id="prow"><span id="pct">0%</span><span id="stage">…</span><span id="eta"></span></div>
     <div id="bar"><div></div></div>
     <div id="steps"><span data-s="prepare">Sequence</span><span data-s="audio">Audio</span><span data-s="analysis">Analysis + cuts</span><span data-s="finish">ඉවර කිරීම</span></div>
-    <div id="cutsline"></div>
+    <div id="strip" style="display:flex; margin-top:8px; border-radius:3px; overflow:hidden; background:#1b1b1b;"></div>
+    <div style="display:flex; margin-top:3px; font-size:11px;"><span id="legend" style="flex:1"></span><span id="striplbl" class="mute"></span></div>
   </div>
 
   <div id="log" style="margin-top:8px"></div>

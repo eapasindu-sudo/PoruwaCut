@@ -56,7 +56,7 @@ def track_beats(env: np.ndarray, bpm: float, tightness: float = 100.0) -> np.nda
     return np.array(beats[::-1]) / FRAME_RATE
 
 
-def detect_beats(audio: np.ndarray, sr: int = SR, segment_sec: float = 60.0):
+def detect_beats(audio: np.ndarray, sr: int = SR, segment_sec: float = 60.0, progress=None):
     """Beats over a long recording; tempo is re-estimated per minute so song changes are handled."""
     if sr != SR:
         raise ValueError("audio must be resampled to 11025 Hz")
@@ -64,6 +64,8 @@ def detect_beats(audio: np.ndarray, sr: int = SR, segment_sec: float = 60.0):
     seg = int(segment_sec * FRAME_RATE)
     beats, tempos = [], []
     for s in range(0, len(env), seg):
+        if progress:
+            progress(s / max(1, len(env)))
         e = env[s:s + seg + int(2 * FRAME_RATE)]  # small overlap
         if len(e) < FRAME_RATE * 4:
             continue

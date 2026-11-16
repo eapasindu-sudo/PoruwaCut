@@ -63,7 +63,28 @@ def check(force: bool = False) -> dict:
     return out
 
 
-def _download_and_run(info: dict, exit_after: bool):
+_PS = r"""
+$ErrorActionPreference = 'SilentlyContinue'
+$setup = $args[0]; $proj = $args[1]; $close = $args[2]
+$exe = $null; $closed = $true
+if ($close -eq '1') {
+  $p = Get-Process | Where-Object { $_.ProcessName -match '^Adobe Premiere' -and $_.MainWindowHandle -ne 0 }
+  if ($p) {
+    $exe = ($p | Select-Object -First 1).Path
+    foreach ($x in $p) { [void]$x.CloseMainWindow() }
+    $p | Wait-Process -Timeout 120
+    $closed = -not (Get-Process -Id ($p.Id) -ErrorAction SilentlyContinue)
+  }
+}
+Start-Process -FilePath $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CLOSEAPPLICATIONS' -Wait
+if ($exe -and $closed) {
+  Start-Sleep -Seconds 2
+  if ($proj) { Start-Process -FilePath $exe -ArgumentList ('"' + $proj + '"') } else { Start-Process -FilePath $exe }
+}
+"""
+
+
+def _download_and_run(info: dict, exit_after: bool, close_premiere: bool = False, reopen: str | None = None):
     try:
         STATE.update(status="downloading", progress=0.0, message="Update download වෙනවා...", version=info["latest"])
         dest = os.path.join(tempfile.gettempdir(), f"PoruwaCut_Setup_{info['latest']}.exe")
@@ -88,9 +109,18 @@ def _download_and_run(info: dict, exit_after: bool):
         STATE.update(status="installing", progress=1.0,
                      message="Install වෙනවා... ඉවර වුණාම Premiere restart කරන්න.")
         if os.name == "nt":
-            flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-            subprocess.Popen([dest, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS"],
-                             creationflags=flags, close_fds=True)
+            flags = 0x00000008 | 0x00000200 | 0x08000000  # DETACHED | NEW_GROUP | NO_WINDOW
+            if close_premiere:
+                # save happened in the panel; close Premiere politely, install, open Premiere again
+                ps = os.path.join(tempfile.gettempdir(), "poruwacut_update.ps1")
+                with open(ps, "w", encoding="utf-8") as f:
+                    f.write(_PS)
+                STATE["message"] = "Premiere close කරලා update එක install කරනවා. ඉවර වුණාම Premiere ආයෙ open වෙනවා."
+                subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden",
+                                  "-File", ps, dest, reopen or "", "1"], creationflags=flags, close_fds=True)
+            else:
+                subprocess.Popen([dest, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS"],
+                                 creationflags=flags, close_fds=True)
         else:
             STATE.update(status="downloaded", message=f"Windows නොවන නිසා install කළේ නැහැ: {dest}")
             return
@@ -101,7 +131,7 @@ def _download_and_run(info: dict, exit_after: bool):
         STATE.update(status="error", message=f"Update අසාර්ථකයි: {e}")
 
 
-def start_install(exit_after: bool | None = None) -> dict:
+def start_install(exit_after: bool | None = None, close_premiere: bool = False, reopen: str | None = None) -> dict:
     if STATE["status"] in ("downloading", "installing"):
         return STATE
     info = check(force=True)
@@ -110,7 +140,7 @@ def start_install(exit_after: bool | None = None) -> dict:
         return STATE
     if exit_after is None:
         exit_after = FROZEN
-    threading.Thread(target=_download_and_run, args=(info, exit_after), daemon=True).start()
+    threading.Thread(target=_download_and_run, args=(info, exit_after, close_premiere, reopen), daemon=True).start()
     STATE.update(status="downloading", progress=0.0, version=info["latest"])
     return STATE
 

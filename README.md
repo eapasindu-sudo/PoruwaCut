@@ -37,8 +37,8 @@
 ## 2. Updates
 
 - Panel එකේ පහළ දකුණේ **Check update** button එක තියෙනවා. අලුත් version එකක් ආවම උඩින් banner එකක් එනවා, **Update කරන්න** ඔබන්න.
-- Engine එක installer එක download කරලා, checksum එක check කරලා, නිහඬව (silent) install කරනවා. Plugin එකත් update වෙනවා.
-- ඉවර වුණාම **Premiere restart කරන්න**.
+- Panel එක project එක **save** කරනවා → engine එක update එක download කරලා checksum check කරනවා →
+  **Premiere close කරලා** install කරලා → **Premiere ආයෙ open කරනවා** (ඔබේ project එකත් එක්ක).
 - Edit එකක් run වෙද්දී update වෙන්නේ නැහැ.
 
 ## 3. අලුත් version එකක් release කරන විදිහ (developer ට)
@@ -73,9 +73,11 @@ GitHub නැතිව ඔබේ PC එකේම build කරන්න: Python 3
    - **Multicamera edit**: කැමරා nest කරලා multicam enable කරලා angle cuts. Analysis එක යන ගමන් nest එක timeline
      එකේ live cut වෙනවා. ඉවර වුණාම project එක save කරලා, හැම කෑල්ලක්ම multicam clip එකක් වුණු **project copy එකක්**
      (`<project> - PoruwaCut <time>.prproj`) open වෙනවා. Program Monitor › Multi-Camera view (Shift+0) එකෙන් angles මාරු කරන්න.
-   - **Manual cutting (stacked)**: sequence එක clone කරලා, කැමරා tracks live razor කරලා තෝරපු කැමරාව විතරක් enable කරනවා.
+   - **Manual cutting (stacked)**: sequence එක clone කරලා, කැමරා tracks live cut කරලා තෝරපු කැමරාව විතරක් enable කරනවා.
      Angle එකක් මාරු කරන්න කෑල්ල select කරලා **Shift+E**.
-6. **Auto Edit ▶**. ප්‍රතිශතය, ඉතිරි කාලය සහ timeline එකේ වැටුණු cuts ගණන පේනවා.
+     Premiere 27.1+ නම් Adobe razor එක, 26.x / 27.0 නම් clone + trim ක්‍රමය ඉබේම තෝරගන්නවා.
+     **පළවෙනි වතාවට කලින් "Razor test" ඔබලා** ඔබේ Premiere එකේ cut කිරීම හරියට වැඩද කියලා බලන්න.
+6. **Auto Edit ▶**. ප්‍රතිශතය (audio අහන කොටසත් එක්ක), ඉතිරි කාලය, සහ කැමරා පාට වලින් **live cut strip** එකක් පේනවා.
 
 ### Events වල cut කරන විදිහ
 | Event | Cuts වැටෙන්නේ | විශේෂ |

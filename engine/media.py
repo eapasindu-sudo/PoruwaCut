@@ -78,29 +78,46 @@ def nvdec_available() -> bool:
     return _NVDEC_OK
 
 
+_DECODE_MODE: str | None = None  # remembered after the first success: "cuda_scale" | "cuda" | "cpu"
+
+
 def iter_frames(path: str, start: float, duration: float, fps: float, width: int = 320,
                 use_gpu: bool = True, gray: bool = False):
     """Yield (time_in_file, frame) sampled at `fps`, scaled to `width` px wide.
 
-    Uses NVDEC hardware decode when available; falls back to CPU automatically.
+    Fastest first: NVIDIA decode + resize on the GPU (only the small frame is copied back), then
+    NVIDIA decode + CPU resize, then plain CPU. The first mode that works is remembered.
     """
+    global _DECODE_MODE
     info = probe(path)
     h = int(round(info.height * width / info.width / 2)) * 2
     pix = "gray" if gray else "bgr24"
     ch = 1 if gray else 3
     frame_bytes = width * h * ch
 
-    def _cmd(gpu: bool):
+    def _cmd(mode: str):
         c = [FFMPEG, "-hide_banner", "-loglevel", "error"]
-        if gpu:
+        if mode == "cuda_scale":
+            c += ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
+            vf = f"fps={fps},scale_cuda={width}:{h}:format=nv12,hwdownload,format=nv12,format={pix}"
+        elif mode == "cuda":
             c += ["-hwaccel", "cuda"]
+            vf = f"fps={fps},scale={width}:{h}:flags=area"
+        else:
+            vf = f"fps={fps},scale={width}:{h}:flags=area"
         c += ["-ss", f"{max(0.0, start):.3f}", "-t", f"{duration:.3f}", "-i", path,
-              "-an", "-vf", f"fps={fps},scale={width}:{h}:flags=area", "-f", "rawvideo", "-pix_fmt", pix, "-"]
+              "-an", "-sn", "-dn", "-vf", vf, "-f", "rawvideo", "-pix_fmt", pix, "-"]
         return c
 
-    attempts = [True, False] if (use_gpu and nvdec_available()) else [False]
-    for gpu in attempts:
-        proc = subprocess.Popen(_cmd(gpu), stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=frame_bytes * 4, **NOWIN)
+    if _DECODE_MODE:
+        attempts = [_DECODE_MODE] + ([] if _DECODE_MODE == "cpu" else ["cpu"])
+    elif use_gpu and nvdec_available():
+        attempts = ["cuda_scale", "cuda", "cpu"]
+    else:
+        attempts = ["cpu"]
+    for mode in attempts:
+        proc = subprocess.Popen(_cmd(mode), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                bufsize=frame_bytes * 4, **NOWIN)
         n = 0
         try:
             while True:
@@ -114,11 +131,17 @@ def iter_frames(path: str, start: float, duration: float, fps: float, width: int
             proc.stdout.close()
             err = proc.stderr.read().decode(errors="ignore")
             proc.wait()
-        if n > 0 or not gpu:
-            if n == 0 and err.strip():
-                raise RuntimeError(f"ffmpeg failed on {path}: {err.strip()[:500]}")
+        if n > 0:
+            if _DECODE_MODE is None:
+                _DECODE_MODE = mode
             return
-        # GPU produced nothing -> retry on CPU
+        if mode == "cpu" and err.strip():
+            raise RuntimeError(f"ffmpeg failed on {path}: {err.strip()[:500]}")
+        # this mode produced nothing -> try the next one
+
+
+def decode_mode() -> str:
+    return _DECODE_MODE or "?"
 
 
 def extract_audio(path: str, rate: int = 8000, start: float = 0.0, duration: float | None = None,

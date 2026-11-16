@@ -15,15 +15,20 @@ from .media import extract_audio
 ENV_RATE = 100  # Hz
 
 
-def sequence_audio(project: dict, t0: float, t1: float, rate: int) -> np.ndarray:
+def sequence_audio(project: dict, t0: float, t1: float, rate: int, progress=None) -> np.ndarray:
     """Sum of every audio clip in the sequence (or the cameras' own audio when none given)."""
     buf = np.zeros(int((t1 - t0) * rate) + 1, np.float32)
     tracks = project.get("audio_tracks") or []
     if not tracks:
         tracks = [c["clips"] for c in project["cameras"]]
     used = 0
+    todo = [(trk, cl) for trk in tracks for cl in trk]
+    done = 0
     for trk in tracks:
         for cl in trk:
+            done += 1
+            if progress:
+                progress(min(1.0, done / max(1, len(todo))))
             a, b = max(t0, cl["tl_start"]), min(t1, cl["tl_end"])
             if b - a < 0.5:
                 continue
@@ -92,7 +97,7 @@ def phrase_points(x: np.ndarray, rate: int, min_pause: float = 0.18, min_gap: fl
     return np.array(times), np.array(strength)
 
 
-def music_activity(x: np.ndarray, rate: int, win: float = 6.0) -> np.ndarray:
+def music_activity(x: np.ndarray, rate: int, win: float = 6.0, progress=None) -> np.ndarray:
     """Per-second 0..1: strong regular pulse (music / drums) vs speech, chanting or silence."""
     from .beats import onset_strength, SR, FRAME_RATE
     if rate != SR:
@@ -103,6 +108,8 @@ def music_activity(x: np.ndarray, rate: int, win: float = 6.0) -> np.ndarray:
     w = int(win * FRAME_RATE)
     lag_lo, lag_hi = int(0.3 * FRAME_RATE), int(1.0 * FRAME_RATE)
     for s in range(secs):
+        if progress and s % 30 == 0:
+            progress(s / max(1, secs))
         c = int(s * FRAME_RATE)
         seg = env[max(0, c - w // 2):c + w // 2]
         if len(seg) < lag_hi * 2:

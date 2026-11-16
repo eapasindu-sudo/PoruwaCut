@@ -31,7 +31,7 @@ def _merge_into(committed: list, new: list):
 
 
 def run(project: dict, event: str = "auto", out_dir: str = "out", overrides: dict | None = None,
-        analysis_fps: float = 5.0, use_gpu: bool = True, workers: int = 2, layout: str = "stacked",
+        analysis_fps: float | None = None, use_gpu: bool = True, workers: int = 2, layout: str = "stacked",
         remove_dead: bool = False, cache_dir: str | None = None, write_xml: bool = True, log=print,
         progress=None, on_segments=None, window: float = 60.0, lookahead: float = 12.0) -> dict:
     """progress(stage, overall, stage_frac); on_segments(committed_segments, committed_until)."""
@@ -43,9 +43,11 @@ def run(project: dict, event: str = "auto", out_dir: str = "out", overrides: dic
     os.makedirs(out_dir, exist_ok=True)
     cache_dir = cache_dir or os.path.join(os.path.dirname(os.path.abspath(out_dir)), ".poruwacut_cache")
     preset = presets.get(event, overrides)
+    analysis_fps = float(analysis_fps or preset.analysis_fps)
+    workers = max(int(workers or 1), min(6, len(project["cameras"])))  # every camera in parallel
     t0, t1 = project["range"]
     fps = float(project["fps"])
-    stages = {"audio": (0.0, 0.05), "analysis": (0.05, 0.97), "cuts": (0.97, 0.99), "xml": (0.99, 1.0)}
+    stages = {"audio": (0.0, 0.08), "analysis": (0.08, 0.97), "cuts": (0.97, 0.99), "xml": (0.99, 1.0)}
 
     def prog(stage, f):
         if progress:
@@ -57,24 +59,25 @@ def run(project: dict, event: str = "auto", out_dir: str = "out", overrides: dic
     # ---- audio: beats, phrase ends, music activity -------------------------------------------
     prog("audio", 0.0)
     log("Audio එක අහමින් (beats, වචන ඉවර වෙන තැන්, music)...")
-    audio = sequence_audio(project, t0, t1, beatmod.SR)
+    audio = sequence_audio(project, t0, t1, beatmod.SR, progress=lambda f: prog("audio", 0.5 * f))
     beats = dbeats = np.zeros(0)
     beat_period = None
     music = np.zeros(int(t1 - t0) + 1)
     ph = (np.zeros(0), np.zeros(0))
     if len(audio) > beatmod.SR * 2 and np.abs(audio).max() > 0:
         if preset.grid in ("beats", "auto"):
-            b, _tempos, strength = beatmod.detect_beats(audio)
+            b, _tempos, strength = beatmod.detect_beats(audio, progress=lambda f: prog("audio", 0.5 + 0.3 * f))
             beats = b + t0
             dbeats = beatmod.downbeats(beats, strength)
             if len(b) > 2:
                 beat_period = float(np.median(np.diff(b)))
-        prog("audio", 0.5)
+        prog("audio", 0.8)
         if preset.grid in ("phrases", "auto"):
             pt, ps = phrase_points(audio, beatmod.SR)
             ph = (pt + t0, ps)
         if preset.grid == "auto":
-            music = music_activity(audio, beatmod.SR)
+            prog("audio", 0.85)
+            music = music_activity(audio, beatmod.SR, progress=lambda f: prog("audio", 0.85 + 0.15 * f))
         log(f"  beats {len(beats)}" + (f" (~{60 / beat_period:.0f} BPM)" if beat_period else "")
             + f", වචන ඉවර වෙන තැන් {len(ph[0])}"
             + (f", music {100 * float((music > 0.55).mean()):.0f}% of time" if preset.grid == "auto" else ""))
@@ -129,7 +132,8 @@ def run(project: dict, event: str = "auto", out_dir: str = "out", overrides: dic
             if on_segments:
                 on_segments([dict(s) for s in committed], commit_t)
         log(f"  {(w1 - t0) / 60:.1f}/{(t1 - t0) / 60:.1f} min: cuts {max(0, len(committed) - 1)}")
-    log(f"  face detector: {', '.join(sorted(detectors))}")
+    from .media import decode_mode
+    log(f"  face detector: {', '.join(sorted(detectors))} · decode: {decode_mode()} · fps {analysis_fps:g} · parallel {workers}")
 
     # ---- weak stretches (all cameras poor) -------------------------------------------------
     prog("cuts", 0.0)
