@@ -32,7 +32,7 @@ def _cache_path(cache_dir: str, path: str, chunk_start: float, chunk_len: float,
     return os.path.join(cache_dir, f"{base}_{int(chunk_start):06d}_{h}.npz")
 
 
-def _analyze_chunk(path: str, start: float, length: float, fps: float, use_gpu: bool) -> dict:
+def _analyze_chunk(path: str, start: float, length: float, fps: float, use_gpu: bool, tick=None) -> dict:
     n = int(round(length * fps))
     out = {m: np.full(n, np.nan, np.float32) for m in METRICS}
     det = FaceDetector(use_gpu)
@@ -42,6 +42,8 @@ def _analyze_chunk(path: str, start: float, length: float, fps: float, use_gpu: 
         k = int(round((t - start) * fps))
         if k >= n:
             break
+        if tick:
+            tick(1.0 / fps)
         h, w = frame.shape[:2]
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
@@ -78,7 +80,7 @@ def _analyze_chunk(path: str, start: float, length: float, fps: float, use_gpu: 
 
 
 def analyze_file(path: str, f_start: float, f_end: float, fps: float, cache_dir: str,
-                 chunk_len: float = 300.0, use_gpu: bool = True, progress=None) -> dict:
+                 chunk_len: float = 300.0, use_gpu: bool = True, progress=None, tick=None) -> dict:
     """Metrics on grid times j/fps for f_start <= j/fps < f_end (file time)."""
     os.makedirs(cache_dir, exist_ok=True)
     info = probe(path)
@@ -97,8 +99,10 @@ def analyze_file(path: str, f_start: float, f_end: float, fps: float, cache_dir:
         cp = _cache_path(cache_dir, path, cs, chunk_len, fps)
         if os.path.exists(cp):
             d = dict(np.load(cp))
+            if tick:
+                tick(cl)  # cached segment counts as done
         else:
-            d = _analyze_chunk(path, cs, cl, fps, use_gpu)
+            d = _analyze_chunk(path, cs, cl, fps, use_gpu, tick)
             np.savez_compressed(cp, **d)
         parts.append((ci, d))
         if progress:
@@ -118,7 +122,7 @@ def analyze_file(path: str, f_start: float, f_end: float, fps: float, cache_dir:
 
 
 def analyze_cameras(cams: list[dict], t0: float, t1: float, fps: float, cache_dir: str,
-                    use_gpu: bool = True, workers: int = 2, log=print) -> dict:
+                    use_gpu: bool = True, workers: int = 2, log=print, progress=None) -> dict:
     """Analyse all cameras over master-timeline range [t0, t1).
 
     cams: [{"clips": [{"path", "offset", "tl_start", "tl_end"}]}], offset = master_time - file_time.
@@ -134,20 +138,35 @@ def analyze_cameras(cams: list[dict], t0: float, t1: float, fps: float, cache_di
             if b - a > 0.5:
                 jobs.append((i, cl, a, b))
     done = [0]
+    # progress in "seconds of footage analysed" (whole 5-min chunks are decoded, so count chunk spans)
+    import threading as _th
+    _lk = _th.Lock()
+    total = 0.0
+    for i, cl, a, b in jobs:
+        fa, fb = a - cl["offset"], b - cl["offset"]
+        cs = math.floor(max(0.0, fa) / 300.0) * 300.0
+        ce = min(math.ceil(fb / 300.0) * 300.0, cl.get("duration", fb) or fb)
+        total += max(1e-3, ce - cs)
+    acc = [0.0]
+
+    def tick(sec):
+        with _lk:
+            acc[0] += sec
+            frac = min(1.0, acc[0] / total)
+        if progress:
+            progress(frac)
 
     def work(job):
         i, cl, a, b = job
-        def prog(path, x, y):
-            log(f"PROGRESS cam{i + 1} {os.path.basename(path)} segment {x}/{y}")
         r = analyze_file(cl["path"], a - cl["offset"], b - cl["offset"], fps, cache_dir,
-                         use_gpu=use_gpu, progress=prog)
+                         use_gpu=use_gpu, tick=tick)
         return i, cl, r
 
     detectors = {}
     with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
         for i, cl, r in ex.map(work, jobs):
             done[0] += 1
-            log(f"PROGRESS clips {done[0]}/{len(jobs)}")
+            log(f"  clip {done[0]}/{len(jobs)} ඉවරයි: cam{i + 1} {os.path.basename(cl['path'])}")
             detectors[i] = r.get("detector", "?")
             if not len(r["times"]):
                 continue

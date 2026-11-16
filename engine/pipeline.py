@@ -39,7 +39,16 @@ def make_config(mode: str, overrides: dict | None = None) -> ModeConfig:
 
 def run(project: dict, mode: str = "ceremony", out_dir: str = "out", overrides: dict | None = None,
         analysis_fps: float = 5.0, use_gpu: bool = True, workers: int = 2, layout: str = "stacked",
-        remove_dead: bool = False, cache_dir: str | None = None, write_xml: bool = True, log=print) -> dict:
+        remove_dead: bool = False, cache_dir: str | None = None, write_xml: bool = True, log=print,
+        progress=None) -> dict:
+    """progress(stage, overall_fraction, stage_fraction) is called often during the run."""
+    stages = {"beats": (0.00, 0.04), "analysis": (0.04, 0.96), "cuts": (0.96, 0.99), "xml": (0.99, 1.0)}
+
+    def prog(stage, f):
+        if progress:
+            a, b = stages[stage]
+            progress(stage, a + (b - a) * f, f)
+
     t_start = time.time()
     os.makedirs(out_dir, exist_ok=True)
     # shared by every output folder next to it, so ceremony + dance runs reuse one analysis
@@ -52,6 +61,7 @@ def run(project: dict, mode: str = "ceremony", out_dir: str = "out", overrides: 
     beats = dbeats = np.zeros(0)
     tempos, beat_period = [], None
     if cfg.use_beats:
+        prog("beats", 0.0)
         log("Music beats හොයමින්...")
         audio = master_audio(project, t0, t1, beatmod.SR)
         b, tempos, strength = beatmod.detect_beats(audio)
@@ -64,10 +74,13 @@ def run(project: dict, mode: str = "ceremony", out_dir: str = "out", overrides: 
             log("  beats හමු නොවුණි - time grid එකට cut කරයි")
 
     log("Visual analysis (segment by segment)...")
-    an = analyze_cameras(project["cameras"], t0, t1, analysis_fps, cache_dir, use_gpu, workers, log)
+    prog("analysis", 0.0)
+    an = analyze_cameras(project["cameras"], t0, t1, analysis_fps, cache_dir, use_gpu, workers, log,
+                         progress=lambda f: prog("analysis", f))
     dets = {c.get("detector", "?") for c in an["cams"]}
     log(f"  face detector: {', '.join(sorted(dets))}")
 
+    prog("cuts", 0.0)
     log("Shots score කරමින් සහ cut තෝරමින්...")
     scores, parts = score_cameras(an, cfg, beat_period)
     bounds, is_down, (lmin, lmax) = make_blocks(t0, t1, cfg, beats, dbeats)
@@ -106,11 +119,13 @@ def run(project: dict, mode: str = "ceremony", out_dir: str = "out", overrides: 
             w.writerow([f"{s['start']:.3f}", f"{s['end']:.3f}", project["cameras"][s["cam"]]["name"], f"{s['quality']:.2f}"])
     np.savez_compressed(os.path.join(out_dir, "scores.npz"), times=an["times"], scores=scores)
 
+    prog("xml", 0.0)
     if write_xml:
         xp = os.path.join(out_dir, f"AutoEdit_{mode}.xml")
         build_xml(project, result, xp, layout=layout, remove_dead=remove_dead)
         result["xml"] = os.path.abspath(xp)
         log(f"XML: {xp}")
+    prog("xml", 1.0)
     st = result["stats"]
     log(f"ඉවරයි: cuts {st['cuts']}, සාමාන්‍ය shot {st['avg_shot']}s, cams {share}, "
         f"නරක කොටස් {st['dead_regions']} ({st['dead_seconds']}s), කාලය {st['seconds']}s")

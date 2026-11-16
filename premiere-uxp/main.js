@@ -231,6 +231,27 @@ async function readSequence() {
   log(`කැමරා ${cams.length}ක් කියෙව්වා ✔`, "ok");
 }
 
+// ---------- progress display ----------
+const STAGES = ["sync", "beats", "analysis", "cuts", "xml", "import"];
+const STAGE_TXT = {
+  queued: "පෝලිමේ…", sync: "Audio sync කරමින්…", beats: "Music beats හොයමින්…",
+  analysis: "කැමරා visuals analyze කරමින්…", cuts: "හොඳම shots තෝරමින්…",
+  xml: "Premiere sequence හදමින්…", import: "Premiere එකට import කරමින්…", done: "ඉවරයි ✔",
+};
+function showProgress(stage, frac, eta) {
+  $("prog").style.display = "block";
+  const pct = Math.max(0, Math.min(100, Math.floor(frac * 100)));
+  $("pct").textContent = pct + "%";
+  $("bar").firstElementChild.style.width = pct + "%";
+  $("stage").textContent = STAGE_TXT[stage] || stage;
+  $("eta").textContent = eta != null && stage === "analysis" ? "ඉතිරි ~" + fmt(eta) : "";
+  const idx = STAGES.indexOf(stage);
+  document.querySelectorAll("#steps span").forEach((el) => {
+    const i = STAGES.indexOf(el.getAttribute("data-s"));
+    el.className = idx < 0 ? (stage === "done" ? "done" : "") : i < idx ? "done" : i === idx ? "on" : "";
+  });
+}
+
 const fmt = (s) => {
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = Math.floor(s % 60);
   return (h ? h + ":" : "") + String(m).padStart(2, "0") + ":" + String(x).padStart(2, "0");
@@ -264,6 +285,7 @@ async function autoEdit() {
                layout: $("layout").value, remove_dead: !!$("dead").value },
   };
   $("go").disabled = true;
+  showProgress("queued", 0, null);
   log(`Auto edit පටන් ගන්නවා: ${body.mode}, ${fmt(range[0])} → ${fmt(range[1])}`);
   let job;
   try {
@@ -275,9 +297,14 @@ async function autoEdit() {
     let j;
     try { j = await call("GET", "/api/job/" + job); }
     catch (e) { setTimeout(poll, 1500); return; }
-    $("bar").firstElementChild.style.width = Math.round(j.progress * 100) + "%";
+    showProgress(j.stage || "queued", j.progress || 0, j.eta);
     for (; shown < j.log.length; shown++) log(j.log[shown], j.log[shown].startsWith("ERROR") ? "bad" : "");
-    if (j.status === "done") { await importResult(j.result); $("go").disabled = false; }
+    if (j.status === "done") {
+      showProgress("import", 0.99, null);
+      await importResult(j.result);
+      showProgress("done", 1, null);
+      $("go").disabled = false;
+    }
     else if (j.status === "error") { $("go").disabled = false; }
     else setTimeout(poll, 1000);
   };

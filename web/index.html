@@ -77,6 +77,7 @@
 
   <div class="card" id="prog" style="display:none">
     <h2>Progress</h2>
+    <div style="display:flex;align-items:baseline;gap:12px"><b id="pct" style="font-size:30px;color:var(--acc)">0%</b><span id="stg"></span><span id="eta" style="color:var(--mute);margin-left:auto"></span></div>
     <div class="bar"><i id="pb"></i></div>
     <pre id="log"></pre>
   </div>
@@ -131,7 +132,12 @@ document.getElementById('go').onclick = async () => {
   const { job } = await (await fetch(API + '/api/edit', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) })).json();
   const poll = async () => {
     const j = await (await fetch(API + '/api/job/' + job)).json();
-    document.getElementById('pb').style.width = (j.progress*100).toFixed(0) + '%';
+    const pc = Math.floor((j.progress||0)*100);
+    document.getElementById('pb').style.width = pc + '%';
+    document.getElementById('pct').textContent = pc + '%';
+    const ST = {queued:'පෝලිමේ…',sync:'Audio sync කරමින්…',beats:'Music beats හොයමින්…',analysis:'කැමරා visuals analyze කරමින්…',cuts:'හොඳම shots තෝරමින්…',xml:'Premiere XML හදමින්…'};
+    document.getElementById('stg').textContent = j.status==='done' ? 'ඉවරයි ✔' : (ST[j.stage]||j.stage||'');
+    const e = j.eta; document.getElementById('eta').textContent = (e!=null && j.stage==='analysis') ? `ඉතිරි ~${Math.floor(e/60)}:${String(Math.floor(e%60)).padStart(2,'0')}` : '';
     const lg = document.getElementById('log'); lg.textContent = j.log.join('\n'); lg.scrollTop = 1e9;
     if (j.status === 'done') {
       const s = j.result.stats; go.disabled = false;

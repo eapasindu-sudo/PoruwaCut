@@ -32,22 +32,41 @@ LOCK = threading.Lock()  # one heavy job at a time (GPU / disk friendly)
 
 def _new_job(kind):
     jid = uuid.uuid4().hex[:10]
-    JOBS[jid] = {"id": jid, "kind": kind, "status": "queued", "progress": 0.0, "log": [], "result": None}
+    JOBS[jid] = {"id": jid, "kind": kind, "status": "queued", "progress": 0.0, "stage": "queued",
+                 "stage_progress": 0.0, "eta": None, "elapsed": 0.0, "log": [], "result": None}
     return JOBS[jid]
 
 
 def _logger(job):
-    pat = re.compile(r"PROGRESS clips (\d+)/(\d+)")
-
     def log(msg):
-        m = pat.search(msg)
-        if m:
-            a, b = int(m.group(1)), int(m.group(2))
-            job["progress"] = 0.05 + 0.9 * a / max(1, b)
-        if not msg.startswith("PROGRESS"):
-            job["log"].append(msg)
-            print(f"[{job['id']}] {msg}", flush=True)
+        if msg.startswith("PROGRESS"):
+            return
+        job["log"].append(msg)
+        print(f"[{job['id']}] {msg}", flush=True)
     return log
+
+
+def _progress(job):
+    """Track stage + percentage + ETA (ETA from the analysis rate, the slow part)."""
+    import time
+    t_start = time.time()
+    st = {"a_t0": None, "a_f0": 0.0}
+
+    def progress(stage, overall, stage_frac):
+        now = time.time()
+        job["stage"], job["progress"] = stage, round(float(overall), 4)
+        job["stage_progress"] = round(float(stage_frac), 4)
+        job["elapsed"] = round(now - t_start, 1)
+        if stage == "analysis":
+            if st["a_t0"] is None:
+                st["a_t0"], st["a_f0"] = now, stage_frac
+            done = stage_frac - st["a_f0"]
+            spent = now - st["a_t0"]
+            if done > 0.01 and spent > 3:
+                job["eta"] = round(spent / done * (1 - stage_frac) + 3, 0)
+        elif stage in ("cuts", "xml"):
+            job["eta"] = 2
+    return progress
 
 
 def _default_out(project, mode):
@@ -62,6 +81,7 @@ def _run_edit(job, body):
             job["status"] = "running"
             p = body["project"]
             if "cams" in p:  # folder-based request from the browser UI: sync first
+                job["stage"] = "sync"
                 log("Audio sync...")
                 p = proj.from_folders(p["cams"], int(p.get("master", 1)) - 1, p.get("name", "Wedding"), log)
             else:
@@ -83,7 +103,7 @@ def _run_edit(job, body):
                 ov["cam_bias"] = [float(x) for x in o["cam_bias"]]
             res = run(p, mode, out_dir, ov, float(o.get("fps", 5)), not o.get("cpu", False),
                       int(o.get("workers", 2)), o.get("layout", "stacked"), bool(o.get("remove_dead", False)),
-                      log=log)
+                      log=log, progress=_progress(job))
             res.pop("beats", None)
             job["result"] = res
             job["progress"] = 1.0

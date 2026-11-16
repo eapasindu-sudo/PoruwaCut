@@ -64,8 +64,16 @@ def _do_edit(p, a):
           "max_beats": a.max_beats, "switch_cost": a.switch_cost, "stay_cost": a.stay_cost}
     if a.bias:
         ov["cam_bias"] = [float(x) for x in a.bias.split(",")]
+    last = [-1]
+
+    def progress(stage, overall, _f):
+        pct = int(overall * 100)
+        if pct != last[0]:
+            last[0] = pct
+            print(f"\r  {stage:9s} {pct:3d}%", end="\n" if pct >= 100 else "", flush=True)
+
     res = run(p, a.mode, a.out, ov, a.fps, not a.cpu, a.workers, a.layout, a.remove_dead,
-              write_xml=not a.no_xml, log=log)
+              write_xml=not a.no_xml, log=log, progress=progress)
     log("RESULT " + json.dumps({"xml": res.get("xml"), "result": os.path.abspath(os.path.join(a.out, "result.json"))}))
 
 
