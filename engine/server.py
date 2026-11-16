@@ -22,7 +22,9 @@ from . import project as proj
 from .media import nvdec_available, FFMPEG
 from .faces import FaceDetector
 from .pipeline import run
-from .paths import WEB_INDEX as WEB, LOG_FILE
+from .paths import WEB_INDEX as WEB, LOG_FILE, DATA_DIR
+
+IPC_DIR = os.path.join(DATA_DIR, "ipc")
 from . import updater
 JOBS: dict[str, dict] = {}
 LOCK = threading.Lock()  # one heavy job at a time (GPU / disk friendly)
@@ -93,6 +95,38 @@ def _run_edit(job, body):
         print(traceback.format_exc(), flush=True)
 
 
+def api(method: str, path: str, body: dict | None = None):
+    """One router for both the HTTP server and the file-based IPC used by the Premiere panel.
+    Returns (status_code, json_obj)."""
+    body = body or {}
+    if method == "GET":
+        if path == "/api/ping":
+            return 200, {"ok": True, "version": __version__, "nvdec": nvdec_available(),
+                         "face_detector": FaceDetector().kind, "ffmpeg": FFMPEG}
+        if path.startswith("/api/update/status"):
+            return 200, dict(updater.STATE)
+        if path.startswith("/api/update"):
+            return 200, updater.check(force="force" in path)
+        if path.startswith("/api/job/"):
+            job = JOBS.get(path.rsplit("/", 1)[-1])
+            if not job:
+                return 404, {"error": "no such job"}
+            return 200, {**job, "log": list(job["log"])}
+    elif method == "POST":
+        if path == "/api/update/install":
+            if LOCK.locked():
+                return 409, {"status": "error", "message": "Edit එකක් run වෙනවා. ඉවර වුණාම update කරන්න."}
+            return 200, dict(updater.start_install())
+        if path == "/api/quit":
+            threading.Timer(0.5, lambda: os._exit(0)).start()
+            return 200, {"ok": True}
+        if path == "/api/edit":
+            job = _new_job("edit")
+            threading.Thread(target=_run_edit, args=(job, body), daemon=True).start()
+            return 200, {"job": job["id"]}
+    return 404, {"error": "not found"}
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
@@ -114,20 +148,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path in ("/", "/index.html"):
             with open(WEB, "rb") as f:
                 return self._send(200, body=f.read(), ctype="text/html")
-        if self.path == "/api/ping":
-            return self._send(200, {"ok": True, "version": __version__, "nvdec": nvdec_available(),
-                                    "face_detector": FaceDetector().kind, "ffmpeg": FFMPEG})
-        if self.path.startswith("/api/update/status"):
-            return self._send(200, updater.STATE)
-        if self.path.startswith("/api/update"):
-            return self._send(200, updater.check(force="force" in self.path))
-        if self.path.startswith("/api/job/"):
-            job = JOBS.get(self.path.rsplit("/", 1)[-1])
-            if not job:
-                return self._send(404, {"error": "no such job"})
-            since = 0
-            return self._send(200, {**job, "log": job["log"][since:]})
-        self._send(404, {"error": "not found"})
+        self._send(*api("GET", self.path))
 
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0))
@@ -135,19 +156,43 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(n) or b"{}")
         except Exception:
             return self._send(400, {"error": "bad json"})
-        if self.path == "/api/update/install":
-            if LOCK.locked():
-                return self._send(409, {"status": "error", "message": "Edit එකක් run වෙනවා. ඉවර වුණාම update කරන්න."})
-            return self._send(200, updater.start_install())
-        if self.path == "/api/quit":
-            self._send(200, {"ok": True})
-            threading.Timer(0.5, lambda: os._exit(0)).start()
-            return
-        if self.path == "/api/edit":
-            job = _new_job("edit")
-            threading.Thread(target=_run_edit, args=(job, body), daemon=True).start()
-            return self._send(200, {"job": job["id"]})
-        self._send(404, {"error": "not found"})
+        self._send(*api("POST", self.path, body))
+
+
+def _ipc_loop():
+    """File-based IPC: Premiere's UXP sandbox sometimes blocks http:// fetches, so the panel can
+    drop req_<id>.json into IPC_DIR and read back res_<id>.json instead."""
+    import glob
+    import time
+    os.makedirs(IPC_DIR, exist_ok=True)
+    with open(os.path.join(IPC_DIR, "engine.json"), "w", encoding="utf-8") as f:
+        json.dump({"version": __version__, "pid": os.getpid()}, f)
+    while True:
+        try:
+            for req in glob.glob(os.path.join(IPC_DIR, "req_*.json")):
+                rid = os.path.basename(req)[4:-5]
+                try:
+                    with open(req, encoding="utf-8") as f:
+                        r = json.load(f)
+                    os.remove(req)
+                except (OSError, ValueError):
+                    continue  # still being written
+                try:
+                    code, obj = api(r.get("method", "GET"), r.get("path", ""), r.get("body"))
+                except Exception as e:
+                    code, obj = 500, {"error": str(e)}
+                tmp = os.path.join(IPC_DIR, f"res_{rid}.tmp")
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump({"status": code, "body": obj}, f, ensure_ascii=False, default=float)
+                os.replace(tmp, os.path.join(IPC_DIR, f"res_{rid}.json"))
+            # clean responses nobody picked up
+            now = time.time()
+            for old in glob.glob(os.path.join(IPC_DIR, "res_*.json")):
+                if now - os.path.getmtime(old) > 120:
+                    os.remove(old)
+        except Exception as e:
+            print("IPC error:", e, flush=True)
+        time.sleep(0.25)
 
 
 def _ensure_streams():
@@ -176,6 +221,8 @@ def serve(host="127.0.0.1", port=7788):
           f"   ffmpeg: {FFMPEG}", flush=True)
     print("  මේ window එක open කරලා තියන්න. Premiere panel එක හෝ browser එකෙන් භාවිතා කරන්න.", flush=True)
     threading.Thread(target=updater.check, daemon=True).start()  # warm the update cache
+    threading.Thread(target=_ipc_loop, daemon=True).start()
+    print(f"  IPC folder: {IPC_DIR}", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
