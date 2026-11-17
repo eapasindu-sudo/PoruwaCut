@@ -334,17 +334,40 @@ function hasNativeRazor(seq) {
   catch (e) { return false; }
 }
 
-async function setInAdaptive(project, it, want) {
+// Premiere 26.5 invalidates every track-item object after an edit ("The script object is no longer
+// valid"), so an item is never kept across a transaction: `getIt()` finds it again on the track each
+// time, as the clip that overlaps the window it is being fitted into.
+async function locate(track, win, avoid) {
+  // the clip overlapping `win` the most; ties / zero overlap -> the clip closest to the window.
+  // `avoid` = the other half of a cut, which must never be picked by mistake.
+  let best = null, score = -Infinity;
+  for (const x of await itemsOf(track)) {
+    if (avoid && Math.abs(x.a - avoid[0]) < EPS && Math.abs(x.b - avoid[1]) < EPS) continue;
+    const ov = Math.min(x.b, win[1]) - Math.max(x.a, win[0]);       // negative = gap size
+    const sc = ov > 0.001 ? ov : -Math.abs((x.a + x.b) / 2 - (win[0] + win[1]) / 2) - 1e6;
+    if (sc > score) { score = sc; best = x; }
+  }
+  return best ? best.it : null;
+}
+const locator = (track, win, avoid) => async () => {
+  const it = await locate(track, win, avoid);
+  if (!it) throw new Error(`clip not found at ${fmt(win[0])}`);
+  return it;
+};
+
+async function setInAdaptive(project, getIt, want) {
   // set the source in-point; if Premiere interprets the value on another time base, learn it
+  const setTo = async (x) => { const it = await getIt(); transact(project, "AutoWed cut", () => [it.createSetInPointAction(tt(x))]); };
+  const readIn = async () => (await (await getIt()).getInPoint()).seconds;
   let x = want;
-  transact(project, "AutoWed cut", () => [it.createSetInPointAction(tt(x))]);
-  let r = (await it.getInPoint()).seconds;
+  await setTo(x);
+  let r = await readIn();
   if (Math.abs(r - want) < 0.002) return true;
   let x0 = x, r0 = r;
   x = Math.abs(r) > 1e-6 && Math.abs(want) > 1e-6 ? want * (want / r) : want + (want - r);
   for (let i = 0; i < 4; i++) {
-    transact(project, "AutoWed cut", () => [it.createSetInPointAction(tt(x))]);
-    r = (await it.getInPoint()).seconds;
+    await setTo(x);
+    r = await readIn();
     if (Math.abs(r - want) < 0.002) return true;
     const slope = (r - r0) / ((x - x0) || 1e-9);
     x0 = x; r0 = r;
@@ -359,8 +382,9 @@ async function setInAdaptive(project, it, want) {
 const FIX_ORDERS = [["in", "start", "end"], ["start", "end", "in"], ["end", "in", "start"]];
 let fixOrder = null;
 
-async function applyField(project, it, f, want) {
-  if (f === "in") return setInAdaptive(project, it, want.inp);
+async function applyField(project, getIt, f, want) {
+  if (f === "in") return setInAdaptive(project, getIt, want.inp);
+  const it = await getIt();
   if (f === "start") transact(project, "AutoWed cut", () => [it.createSetStartAction(tt(want.a))]);
   if (f === "end") transact(project, "AutoWed cut", () => [it.createSetEndAction(tt(want.b))]);
 }
@@ -368,21 +392,24 @@ const fieldOk = (c, want, f) => f === "in" ? Math.abs(c.inp - want.inp) <= 0.004
   : f === "start" ? Math.abs(c.a - want.a) <= 0.002 : Math.abs(c.b - want.b) <= 0.002;
 const allOk = (c, want) => fieldOk(c, want, "in") && fieldOk(c, want, "start") && fieldOk(c, want, "end");
 
-async function fixItem(project, it, want) {
-  const orders = fixOrder ? [fixOrder, ...FIX_ORDERS.filter((o) => o !== fixOrder)] : FIX_ORDERS;
-  let c = await readTI(it);
+async function fixItem(project, getIt, want) {
+  const read = async () => readTI(await getIt());
+  let c = await read();
   if (allOk(c, want)) return c;
+  let orders = fixOrder ? [fixOrder, ...FIX_ORDERS.filter((o) => o !== fixOrder)] : FIX_ORDERS.slice();
+  // a clip that has to get longer at the tail: extend the end first, so it never collapses to 0 length
+  if (want.b > c.b + 0.002) orders = [["end", "in", "start"], ["end", "start", "in"], ...orders];
   for (const order of orders) {
     for (let round = 0; round < 2; round++) {
       for (const f of order) {
-        c = await readTI(it);
-        if (!fieldOk(c, want, f)) await applyField(project, it, f, want);
+        c = await read();
+        if (!fieldOk(c, want, f)) await applyField(project, getIt, f, want);
       }
-      c = await readTI(it);
+      c = await read();
       if (allOk(c, want)) { fixOrder = order; return c; }
     }
   }
-  c = await readTI(it);
+  c = await read();
   throw new Error(`sync check failed at ${fmt(want.a)}: start ${c.a.toFixed(3)}/${want.a.toFixed(3)} end ${c.b.toFixed(3)}/${want.b.toFixed(3)} in ${c.inp.toFixed(3)}/${want.inp.toFixed(3)}`);
 }
 
@@ -392,37 +419,40 @@ async function removeItems(project, seq, items, mediaType) {
 }
 
 async function emulatedRazor(project, seq, vIndex, t) {
-  const editor = ppro.SequenceEditor.getEditor(seq);
   const track = await seq.getVideoTrack(vIndex);
   const hit = (await itemsOf(track)).find((x) => x.a < t - EPS && t + EPS < x.b);
   if (!hit) return false;
-  const { it, a, b } = hit;
-  const o = await readTI(it);
+  const { a, b } = hit;
+  const o = await readTI(hit.it);
   const rate = o.out > o.inp && b > a ? (o.out - o.inp) / (b - a) : 1;   // source seconds per timeline second
   const srcAt = (time) => o.inp + (time - a) * rate;
   const left = t - a, right = b - t;
-  let clone = null;
+  const cloneAction = async (win, offset) => {
+    const it = await locate(track, win);
+    const editor = ppro.SequenceEditor.getEditor(seq);
+    transact(project, "AutoWed cut", () => [editor.createCloneTrackItemAction(it, tt(offset), 0, 0, true, false)]);
+  };
+  let cloneWin = null;
   try {
     if (left >= right) {
-      await fixItem(project, it, { a: t, b, inp: srcAt(t) });               // original keeps [t, b]
-      transact(project, "AutoWed cut", () => [editor.createCloneTrackItemAction(it, tt(-left), 0, 0, true, false)]);
-      const c = (await itemsOf(track)).find((x) => Math.abs(x.a - a) < EPS && x.it !== it);
-      if (!c) throw new Error(`clone not found at ${fmt(a)}`);
-      clone = c.it;
-      await fixItem(project, clone, { a, b: t, inp: o.inp });               // clone fills [a, t]
+      await fixItem(project, locator(track, [t, b]), { a: t, b, inp: srcAt(t) });          // original keeps [t, b]
+      await cloneAction([t, b], -left);
+      cloneWin = [a, t];
+      await fixItem(project, locator(track, cloneWin, [t, b]), { a, b: t, inp: o.inp });    // clone fills [a, t]
     } else {
-      await fixItem(project, it, { a, b: t, inp: o.inp });                  // original keeps [a, t]
-      transact(project, "AutoWed cut", () => [editor.createCloneTrackItemAction(it, tt(left), 0, 0, true, false)]);
-      const c = (await itemsOf(track)).find((x) => Math.abs(x.a - t) < EPS && x.it !== it);
-      if (!c) throw new Error(`clone not found at ${fmt(t)}`);
-      clone = c.it;
-      await fixItem(project, clone, { a: t, b, inp: srcAt(t) });            // clone fills [t, b]
+      await fixItem(project, locator(track, [a, t]), { a, b: t, inp: o.inp });              // original keeps [a, t]
+      await cloneAction([a, t], left);
+      cloneWin = [t, b];
+      await fixItem(project, locator(track, cloneWin, [a, t]), { a: t, b, inp: srcAt(t) }); // clone fills [t, b]
     }
   } catch (e) {
     // put this clip back exactly as it was before the failed cut
     try {
-      if (clone) await removeItems(project, seq, [clone], ppro.Constants.MediaType.VIDEO);
-      await fixItem(project, it, { a, b, inp: o.inp });
+      if (cloneWin) {
+        const c = await locate(track, cloneWin);
+        if (c) await removeItems(project, seq, [c], ppro.Constants.MediaType.VIDEO);
+      }
+      await fixItem(project, locator(track, [a, b]), { a, b, inp: o.inp });
       log(`Cut ${fmt(t)} ආපස්සට හැරෙව්වා: clip එක කලින් තිබුණු විදිහටම තියෙනවා.`, "warn");
     } catch (e2) {
       log(`⚠ Cut ${fmt(t)} ආපස්සට හරවන්න බැරි වුණා (V${vIndex + 1}). Ctrl+Z එකෙන් "AutoWed cut" ආපස්සට ගන්න.`, "bad");
