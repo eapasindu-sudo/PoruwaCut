@@ -212,7 +212,11 @@ async function readItem(item) {
   } catch (e) { why = String(e); }
   // titles, graphics, mattes and synthetic clips have no real file (Premiere gives an id or "")
   if (path && !/[\\/]/.test(path)) { why = "file එකක් නෙවෙයි (title / graphic)"; path = ""; }
-  return { start, end, srcIn, speed, path, why, name: await item.getName() };
+  // a proxy (if the editor made one) is analysed instead of the 4K original: much faster to decode
+  let proxy = "";
+  try { if (path && (await clip.hasProxy())) proxy = await clip.getProxyPath(); } catch (e) {}
+  if (proxy && !/[\\/]/.test(proxy)) proxy = "";
+  return { start, end, srcIn, speed, path, proxy, why, name: await item.getName() };
 }
 
 async function readSequence(rangeOverride) {
@@ -239,7 +243,7 @@ async function readSequence(rangeOverride) {
       if (c.why === "nested sequence") { nests.push({ track: t, it, start: c.start, end: c.end, srcIn: c.srcIn, name: c.name }); continue; }
       if (!c.path) { warnings.push(`V${t + 1} "${c.name}": ${c.why || "media path නැත"} – මගහරිනවා`); continue; }
       if (Math.abs(c.speed - 1) > 0.001) { warnings.push(`V${t + 1} "${c.name}": speed ${c.speed} – මගහරිනවා`); continue; }
-      clips.push({ path: c.path, offset: c.start - c.srcIn, src_in: c.srcIn, tl_start: c.start, tl_end: c.end });
+      clips.push({ path: c.path, proxy: c.proxy || undefined, offset: c.start - c.srcIn, src_in: c.srcIn, tl_start: c.start, tl_end: c.end });
     }
     if (clips.length) cams.push({ name: track.name || `V${t + 1}`, track: t, clips });
   }
@@ -253,7 +257,7 @@ async function readSequence(rangeOverride) {
     for (const it of items) {
       const c = await readItem(it);
       if (!c.path || Math.abs(c.speed - 1) > 0.001) continue;
-      clips.push({ path: c.path, offset: c.start - c.srcIn, src_in: c.srcIn, tl_start: c.start, tl_end: c.end });
+      clips.push({ path: c.path, proxy: c.proxy || undefined, offset: c.start - c.srcIn, src_in: c.srcIn, tl_start: c.start, tl_end: c.end });
     }
     if (clips.length) audio.push(clips);
   }
@@ -642,7 +646,7 @@ async function camerasInsideNestItem(nest) {
       if (!c.path || Math.abs(c.speed - 1) > 0.001) continue;
       const s = Math.max(c.start + d, nest.start), e = Math.min(c.end + d, nest.end);
       if (e - s < 0.5) continue;
-      clips.push({ path: c.path, offset: c.start - c.srcIn + d, src_in: c.srcIn, tl_start: s, tl_end: e });
+      clips.push({ path: c.path, proxy: c.proxy || undefined, offset: c.start - c.srcIn + d, src_in: c.srcIn, tl_start: s, tl_end: e });
     }
     if (clips.length) cams.push({ name: track.name || `V${t + 1}`, track: t, clips });
   }

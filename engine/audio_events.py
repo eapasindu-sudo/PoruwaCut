@@ -22,16 +22,16 @@ def sequence_audio(project: dict, t0: float, t1: float, rate: int, progress=None
     if not tracks:
         tracks = [c["clips"] for c in project["cameras"]]
     used = 0
-    todo = [(trk, cl) for trk in tracks for cl in trk]
+    todo = [cl for trk in tracks for cl in trk if min(t1, cl["tl_end"]) - max(t0, cl["tl_start"]) >= 0.5]
     done = 0
     for trk in tracks:
         for cl in trk:
-            done += 1
-            if progress:
-                progress(min(1.0, done / max(1, len(todo))))
             a, b = max(t0, cl["tl_start"]), min(t1, cl["tl_end"])
             if b - a < 0.5:
                 continue
+            done += 1
+            if progress:
+                progress(min(1.0, (done - 0.5) / max(1, len(todo))))
             x = extract_audio(cl["path"], rate, start=a - cl["offset"], duration=b - a)
             if len(x) == 0:
                 continue

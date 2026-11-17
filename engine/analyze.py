@@ -190,7 +190,8 @@ def analyze_cameras(cams: list[dict], t0: float, t1: float, fps: float, cache_di
 
     def work(job):
         i, cl, a, b = job
-        r = analyze_file(cl["path"], a - cl["offset"], b - cl["offset"], fps, cache_dir,
+        src = cl.get("proxy") if cl.get("proxy") and os.path.exists(cl["proxy"]) else cl["path"]
+        r = analyze_file(src, a - cl["offset"], b - cl["offset"], fps, cache_dir,
                          use_gpu=use_gpu, tick=tick)
         return i, cl, r
 
@@ -243,7 +244,8 @@ def find_couple(cams: list[dict], t0: float, t1: float, use_gpu: bool = True, pe
     jobs = samples
     for n, (cl, tt_) in enumerate(jobs):
         try:
-            frame = grab_frame(cl["path"], tt_ - cl["offset"], ANALYSIS_WIDTH)
+            src = cl.get("proxy") if cl.get("proxy") and os.path.exists(cl["proxy"]) else cl["path"]
+            frame = grab_frame(src, tt_ - cl["offset"], ANALYSIS_WIDTH)
             if frame is not None:
                 h, w = frame.shape[:2]
                 full = det.detect_full(frame)

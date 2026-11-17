@@ -63,9 +63,9 @@ def envelope(path: str, cache_dir: str | None = None) -> np.ndarray:
         except Exception:  # noqa: BLE001
             pass
     import subprocess
-    cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-i", path, "-vn", "-ac", "1", "-ar", str(RATE),
+    cmd = [FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "error", "-i", path, "-vn", "-ac", "1", "-ar", str(RATE),
            "-f", "f32le", "-"]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **NOWIN)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, **NOWIN)
     parts, carry = [], np.zeros(0, np.float32)
     block = RATE * 60 * 4
     while True:

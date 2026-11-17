@@ -43,7 +43,7 @@ def probe(path: str) -> MediaInfo:
     """ffprobe a media file (cached). Audio-only files (e.g. DJI WAV) get width=height=0."""
     out = subprocess.run(
         [FFPROBE, "-v", "error", "-print_format", "json", "-show_streams", "-show_format", path],
-        capture_output=True, text=True, check=True, **NOWIN,
+        capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL, timeout=60, **NOWIN,
     ).stdout
     data = json.loads(out)
     v = next((s for s in data["streams"] if s["codec_type"] == "video"), None)
@@ -71,7 +71,7 @@ def nvdec_available() -> bool:
     global _NVDEC_OK
     if _NVDEC_OK is None:
         try:
-            r = subprocess.run([FFMPEG, "-hide_banner", "-hwaccels"], capture_output=True, text=True, timeout=10, **NOWIN)
+            r = subprocess.run([FFMPEG, "-nostdin", "-hide_banner", "-hwaccels"], capture_output=True, text=True, timeout=10, **NOWIN)
             _NVDEC_OK = "cuda" in r.stdout
         except Exception:
             _NVDEC_OK = False
@@ -96,7 +96,7 @@ def iter_frames(path: str, start: float, duration: float, fps: float, width: int
     frame_bytes = width * h * ch
 
     def _cmd(mode: str):
-        c = [FFMPEG, "-hide_banner", "-loglevel", "error"]
+        c = [FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "error"]
         if mode == "cuda_scale":
             c += ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
             vf = f"fps={fps},scale_cuda={width}:{h}:format=nv12,hwdownload,format=nv12,format={pix}"
@@ -105,6 +105,9 @@ def iter_frames(path: str, start: float, duration: float, fps: float, width: int
             vf = f"fps={fps},scale={width}:{h}:flags=area"
         else:
             vf = f"fps={fps},scale={width}:{h}:flags=area"
+            # CPU decode (e.g. 10-bit 4:2:2 HEVC the GPU can't decode): skip the deblocking filter,
+            # invisible at analysis size and a good deal faster
+            c += ["-skip_loop_filter", "all", "-threads", "0"]
         c += ["-ss", f"{max(0.0, start):.3f}", "-t", f"{duration:.3f}", "-i", path,
               "-an", "-sn", "-dn", "-vf", vf, "-f", "rawvideo", "-pix_fmt", pix, "-"]
         return c
@@ -117,7 +120,7 @@ def iter_frames(path: str, start: float, duration: float, fps: float, width: int
         attempts = ["cpu"]
     for mode in attempts:
         proc = subprocess.Popen(_cmd(mode), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                bufsize=frame_bytes * 4, **NOWIN)
+                                stdin=subprocess.DEVNULL, bufsize=frame_bytes * 4, **NOWIN)
         n = 0
         try:
             while True:
@@ -147,7 +150,7 @@ def decode_mode() -> str:
 def extract_audio(path: str, rate: int = 8000, start: float = 0.0, duration: float | None = None,
                   channel: int | None = None) -> np.ndarray:
     """Return mono float32 audio (or one specific channel) at `rate` Hz."""
-    cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-ss", f"{start:.3f}"]
+    cmd = [FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "error", "-ss", f"{start:.3f}"]
     if duration is not None:
         cmd += ["-t", f"{duration:.3f}"]
     cmd += ["-i", path, "-vn"]
@@ -156,8 +159,16 @@ def extract_audio(path: str, rate: int = 8000, start: float = 0.0, duration: flo
     else:
         cmd += ["-ac", "1"]
     cmd += ["-ar", str(rate), "-f", "f32le", "-"]
-    out = subprocess.run(cmd, capture_output=True, check=False, **NOWIN).stdout
-    return np.frombuffer(out, np.float32).copy()
+    # never wait forever on one file (a busy / sleeping drive, a stuck decoder): one retry, then skip
+    limit = 60.0 + 0.5 * (duration if duration is not None else 1200.0)
+    for attempt in range(2):
+        try:
+            out = subprocess.run(cmd, capture_output=True, check=False, stdin=subprocess.DEVNULL,
+                                 timeout=limit, **NOWIN).stdout
+            return np.frombuffer(out[: len(out) // 4 * 4], np.float32).copy()
+        except subprocess.TimeoutExpired:
+            print(f"audio read timed out ({limit:.0f}s, try {attempt + 1}/2): {path}", flush=True)
+    return np.zeros(0, np.float32)
 
 
 def grab_frame(path: str, t: float, width: int = 480):
@@ -166,9 +177,9 @@ def grab_frame(path: str, t: float, width: int = 480):
     try:
         info = probe(path)
         h = int(round(info.height * width / info.width / 2)) * 2
-        cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-ss", f"{max(0.0, t):.3f}", "-i", path,
+        cmd = [FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "error", "-ss", f"{max(0.0, t):.3f}", "-i", path,
                "-frames:v", "1", "-an", "-vf", f"scale={width}:{h}:flags=area", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
-        out = subprocess.run(cmd, capture_output=True, timeout=20, **NOWIN).stdout
+        out = subprocess.run(cmd, capture_output=True, timeout=20, stdin=subprocess.DEVNULL, **NOWIN).stdout
         if len(out) < width * h * 3:
             return None
         return _np.frombuffer(out[: width * h * 3], _np.uint8).reshape(h, width, 3)
