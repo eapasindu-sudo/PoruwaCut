@@ -265,6 +265,9 @@ async function readSequence(rangeOverride) {
     if (clips.length) cams.push({ name: track.name || `V${t + 1}`, track: t, clips });
   }
   const audio = [];
+  // "Enabled audio only": disabled audio clips (Shift+E) and muted tracks are not listened to
+  const onlyEnabled = !$("x_audon") || $("x_audon").value !== "all";
+  let skippedAudio = 0;
   const aCount = await seq.getAudioTrackCount();
   for (let t = 0; t < aCount; t++) {
     const track = await seq.getAudioTrack(t);
@@ -272,6 +275,11 @@ async function readSequence(rangeOverride) {
     const items = track.getTrackItems(ppro.Constants.TrackItemType.CLIP, false);
     const clips = [];
     for (const it of items) {
+      if (onlyEnabled) {
+        let off = false;
+        try { off = await it.isDisabled(); } catch (e) {}
+        if (off) { skippedAudio++; continue; }
+      }
       const c = await readItem(it);
       if (!c.path || Math.abs(c.speed - 1) > 0.001) continue;
       clips.push({ path: c.path, proxy: c.proxy || undefined, offset: c.start - c.srcIn, src_in: c.srcIn, tl_start: c.start, tl_end: c.end });
@@ -279,6 +287,7 @@ async function readSequence(rangeOverride) {
     if (clips.length) audio.push(clips);
   }
   warnings.forEach((w) => log(w, "warn"));
+  if (skippedAudio) log(`Disable කරපු audio clips ${skippedAudio}ක් අහන්නේ නැහැ (enable audio විතරයි).`, "mute");
   $("seqinfo").textContent = `${seq.name} · ${fps.toFixed(2)} fps · ` +
     (hasInOut ? `In ${fmt(inT)} → Out ${fmt(outT)} (${fmt(outT - inT)})` : "In/Out දාලා නැහැ") + ` · audio tracks ${audio.length}`;
   cams.forEach((c, i) => {
@@ -1609,7 +1618,7 @@ async function showStats() {
 }
 
 // studio presets: every panel setting, saved as a file others can copy (Documents\AutoWed Presets)
-const PRESET_IDS = ["event", "etype", "x_live", "min_shot", "max_shot", "stab", "stab_thr", "x_sil", "x_flash", "x_trim", "x_trans", "x_loud", "x_mic", "x_couple", "x_qc"];
+const PRESET_IDS = ["event", "etype", "x_live", "x_audon", "min_shot", "max_shot", "stab", "stab_thr", "x_sil", "x_flash", "x_trim", "x_trans", "x_loud", "x_mic", "x_couple", "x_qc"];
 let STUDIO = [];
 async function presetsRefresh(quiet) {
   try {
@@ -1757,4 +1766,10 @@ try { showTab(localStorage.getItem("autowed.tab") || "edit"); } catch (e) { show
 if ($("x_live")) {
   try { const v = localStorage.getItem("autowed.live"); if (v) $("x_live").value = v; } catch (e) {}
   $("x_live").addEventListener("change", () => { try { localStorage.setItem("autowed.live", $("x_live").value); } catch (e) {} });
+}
+
+// "Enabled audio only" is remembered too
+if ($("x_audon")) {
+  try { const v = localStorage.getItem("autowed.audon"); if (v) $("x_audon").value = v; } catch (e) {}
+  $("x_audon").addEventListener("change", () => { try { localStorage.setItem("autowed.audon", $("x_audon").value); } catch (e) {} });
 }
