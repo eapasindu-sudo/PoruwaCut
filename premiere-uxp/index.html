@@ -3,148 +3,189 @@
 <head>
 <meta charset="utf-8">
 <style>
-  html, body { height:100%; overflow:hidden; }
-  #wrap { height:100vh; overflow-y:auto; overflow-x:hidden; padding:10px 12px 4px 10px; box-sizing:border-box; }
-  body { background:#232323; color:#e6e6e6; font-family: "Iskoola Pota","Nirmala UI","Segoe UI",sans-serif; font-size:12px; margin:0; padding:0; }
-  h1 { font-size:15px; margin:0; } h1 span { color:#d4a24c; }
-  .mute { color:#9a9a9a; }
-  .ok { color:#5fb37a; } .bad { color:#e0645a; } .warn { color:#d4a24c; }
-  .top { display:flex; align-items:baseline; }
-  .top h1 { margin-right:8px; }
-  #eng { font-size:11px; }
-  .sec { border:1px solid #3a3a3a; border-radius:6px; padding:8px 10px; margin:8px 0; }
-  .sec > b { display:block; font-size:11px; color:#9a9a9a; text-transform:uppercase; letter-spacing:1px; margin-bottom:6px; }
-  .trk { display:flex; align-items:center; padding:3px 0; border-bottom:1px solid #2e2e2e; }
-  .trk .nm { flex:1; } .trk .c { color:#9a9a9a; }
-  .row { display:flex; align-items:center; margin:5px 0; }
-  .row label { width:110px; color:#bdbdbd; }
-  .row select, .row input { flex:1; }
-  input, select { background:#1b1b1b; color:#e6e6e6; border:1px solid #444; border-radius:4px; padding:3px 6px; }
-  button { background:#3a3a3a; color:#e6e6e6; border:1px solid #555; border-radius:4px; padding:5px 10px; }
-  button.go { background:#d4a24c; color:#1d1d1d; border:none; font-weight:bold; padding:8px 18px; }
-  .hint { font-size:11px; color:#8a8a8a; margin:2px 0 0 110px; }
-  #upd { display:none; background:#2e2a22; border:1px solid #d4a24c; border-radius:6px; padding:8px 10px; margin:8px 0; }
-  #prog { display:none; border:1px solid #3a3a3a; border-radius:6px; padding:8px 10px; margin:8px 0; }
+  html, body { height:100%; overflow:hidden; margin:0; padding:0; }
+  body { background:#121316; color:#ececf0; font-family:"Segoe UI","Nirmala UI","Iskoola Pota",sans-serif; font-size:12px; }
+  #app { display:flex; height:100vh; }
+  #rail { width:60px; min-width:60px; background:#0d0e10; border-right:1px solid #23242a; display:flex; flex-direction:column; align-items:center; padding:10px 0; }
+  #logo { width:34px; height:34px; border-radius:9px; background:#b48cff; color:#121316; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:15px; margin-bottom:12px; }
+  .rbtn { position:relative; width:48px; height:50px; margin:2px 0; border-radius:9px; background:transparent; border:none; color:#8d8e96; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:0; }
+  .rbtn.on { background:#221d33; color:#b48cff; }
+  .rbtn .rnum { position:absolute; right:3px; top:2px; font-size:8px; font-weight:700; }
+  .rlbl { font-size:9px; font-weight:600; margin-top:3px; }
+  .rdiv { width:28px; height:1px; background:#23242a; margin:8px 0; }
+  #rfoot { margin-top:auto; display:flex; flex-direction:column; align-items:center; }
+  #rdot { width:8px; height:8px; border-radius:4px; background:#5f6068; }
+  #rdot.ok { background:#5fd08a; }
+  #rver { font-size:8px; color:#6f7078; margin-top:6px; }
+  #main { flex:1; min-width:0; display:flex; flex-direction:column; }
+  #hdr { display:flex; align-items:center; padding:10px 14px; border-bottom:1px solid #25262c; }
+  #hdr .t { flex:1; min-width:0; display:flex; flex-direction:column; }
+  #h_step { font-size:10px; letter-spacing:1.4px; color:#8d8e96; font-weight:600; }
+  #h_title { font-size:16px; font-weight:700; }
+  #eng { font-size:10px; color:#8d8e96; margin-left:6px; }
+  #chip { font-size:9px; padding:3px 6px; border-radius:4px; background:#2a2140; color:#b48cff; margin-left:8px; }
+  #upd { display:none; background:#2a2236; border-bottom:1px solid #b48cff; padding:8px 14px; }
+  #prog { padding:12px 14px; background:#17181c; border-bottom:1px solid #25262c; }
   #prow { display:flex; align-items:baseline; }
-  #pct { font-size:26px; font-weight:bold; color:#d4a24c; margin-right:10px; min-width:70px; }
-  #stage { flex:1; } #eta { color:#9a9a9a; }
-  #bar { height:8px; background:#1b1b1b; border-radius:4px; margin:6px 0 4px; } #bar div { height:8px; width:0; background:#d4a24c; border-radius:4px; }
-  #steps { display:flex; font-size:10px; color:#6a6a6a; } #steps span { flex:1; } #steps span.on { color:#d4a24c; } #steps span.done { color:#5fb37a; }
-  #cutsline { font-size:11px; color:#bdbdbd; margin-top:4px; }
-  #log { background:#161616; border:1px solid #333; border-radius:4px; padding:6px; height:130px; overflow-y:scroll; font-size:11px; white-space:pre-wrap; }
-  #foot { display:flex; align-items:center; justify-content:flex-end; margin-top:6px; padding-top:6px; border-top:1px solid #2e2e2e; }
-  #foot .mute { margin-right:8px; font-size:11px; }
-  #chk, #dbg, #tlcol { padding:4px 10px; font-size:11px; }
-  .qrow { display:flex; gap:6px; align-items:center; padding:3px 0; border-bottom:1px solid #2a2a2a; font-size:11px; }
-  .qrow span { flex:1; }
-  .qrow select { font-size:11px; }
-  .qrow button { padding:1px 6px; }
-  #tlcol.on { color:#d4a24c; }
-  #dbg { margin-right:6px; }
-  #dbg.on { color:#d4a24c; }
-  .stopbtn { background:#a8423a; color:#fff; border:none; font-weight:bold; padding:8px 14px; }
-  #lang { margin-left:auto; padding:2px 8px; font-size:11px; }
-  details.sec > summary { font-size:11px; color:#9a9a9a; text-transform:uppercase; letter-spacing:1px; cursor:pointer; }
-  .btnrow button { margin:3px 3px 0 0; }
+  #pct { font-size:34px; font-weight:700; line-height:1; margin-right:10px; }
+  #stage { flex:1; color:#c4c5cc; } #eta { color:#8d8e96; }
+  #bar { display:none; } #bar div { height:4px; width:0; background:#b48cff; }
+  #steps { display:none; }
+  #ticks { display:flex; justify-content:space-between; color:#6f7078; font-size:9px; padding-left:44px; margin-top:8px; }
+  .lane { display:flex; align-items:center; margin-top:4px; }
+  .lane .ln { width:40px; font-size:9px; font-weight:700; }
+  .lane .lt { flex:1; height:12px; background:#1f2026; border-radius:3px; position:relative; overflow:hidden; }
+  .lane .sg { position:absolute; top:0; height:12px; }
+  .lane .ph { position:absolute; top:0; width:1px; height:12px; background:#b48cff; }
+  #strip { display:none; }
+  #tiles { display:flex; margin-top:10px; }
+  .tile { flex:1; background:#1f2026; border-radius:6px; padding:6px 8px; margin-right:6px; }
+  .tile:last-child { margin-right:0; }
+  .tile b { display:block; font-size:15px; font-weight:600; }
+  .tile span { font-size:8px; color:#8d8e96; letter-spacing:0.8px; }
+  #legend, #striplbl { display:none; }
+  #wrap { flex:1; overflow-y:auto; overflow-x:hidden; padding:12px 14px; }
+  .pane { display:none; } .pane.on { display:block; }
+  .lbl { display:block; font-size:10px; letter-spacing:1.2px; color:#8d8e96; font-weight:600; margin:12px 0 6px; }
+  .lbl:first-child { margin-top:0; }
+  .mute { color:#8d8e96; } .ok { color:#5fd08a; } .bad { color:#e8685a; } .warn { color:#e8a04a; }
+  .card { background:#17181c; border:1px solid #25262c; border-radius:10px; padding:12px; margin-bottom:10px; }
+  .pills { display:flex; flex-wrap:wrap; }
+  .pill { background:#1f2026; border:1px solid #2c2d34; color:#c4c5cc; border-radius:999px; padding:6px 10px; margin:0 6px 6px 0; font-size:11px; }
+  .pill.on { background:#b48cff; border-color:#b48cff; color:#121316; font-weight:700; }
+  .seg2 { display:flex; }
+  .seg2 button { flex:1; background:#1f2026; border:1px solid #2c2d34; color:#c4c5cc; border-radius:8px; padding:9px; margin-right:8px; }
+  .seg2 button:last-child { margin-right:0; }
+  .seg2 button.on { background:#26203a; border-color:#b48cff; color:#fff; font-weight:600; }
+  .row { display:flex; align-items:center; margin:6px 0; }
+  .row label { width:120px; color:#bdbec5; }
+  .row select, .row input { flex:1; }
+  input, select { background:#1f2026; color:#ececf0; border:1px solid #2c2d34; border-radius:6px; padding:5px 8px; }
+  button { background:#1f2026; color:#ececf0; border:1px solid #2c2d34; border-radius:7px; padding:7px 12px; }
+  button.go { background:#b48cff; color:#121316; border:none; font-weight:700; padding:12px 16px; }
+  .stopbtn { background:#a8423a; color:#fff; border:none; font-weight:700; padding:12px 14px; }
+  .hint { font-size:11px; color:#8d8e96; margin:6px 0 0; }
+  .item { display:flex; align-items:center; background:#1f2026; border-radius:6px; padding:8px 10px; margin-bottom:6px; }
+  .item span:first-child { flex:1; }
+  .trk { display:flex; padding:4px 0; border-bottom:1px solid #1f2026; } .trk .nm { flex:1; } .trk .c { color:#8d8e96; }
+  #log { background:#0d0e10; border:1px solid #23242a; border-radius:8px; padding:8px; height:420px; overflow-y:scroll; font-size:11px; white-space:pre-wrap; }
+  #minilog { background:#0d0e10; border-radius:8px; padding:8px 10px; font-size:10px; line-height:1.6; color:#8d8e96; min-height:52px; }
+  #mlist .item { font-size:11px; }
+  #foot { display:flex; align-items:center; padding:10px 14px; background:#17181c; border-top:1px solid #25262c; }
+  #foot .go { flex:1; margin-right:8px; } #foot .stopbtn { margin-right:8px; }
+  .qrow { display:flex; align-items:center; padding:6px 8px; background:#1f2026; border-radius:6px; margin-bottom:6px; font-size:11px; }
+  .qrow span { flex:1; } .qrow select { font-size:11px; margin-left:4px; } .qrow button { padding:2px 7px; margin-left:4px; }
+  .btnrow button { margin:3px 6px 3px 0; }
+  #tlcol.on, #dbg.on { color:#b48cff; border-color:#b48cff; }
 </style>
 </head>
 <body>
-<div id="wrap">
-  <div class="top"><h1>Auto<span>Wed</span></h1><span id="eng" class="mute">engine…</span><button id="lang" title="සිංහල / English">EN</button></div>
+<div id="app">
+  <nav id="rail">
+    <div id="logo">A</div>
+<button class="rbtn" data-tab="sync" title="Sync"><span class="rnum">0</span><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h3l3-7 4 14 3-7h5"></path></svg><span class="rlbl" data-i18n="r_sync">Sync</span></button>
+<button class="rbtn" data-tab="seq" title="Sequence"><span class="rnum">1</span><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"></rect><path d="M3 10h18M8 5v14"></path></svg><span class="rlbl" data-i18n="r_seq">Sequence</span></button>
+<button class="rbtn" data-tab="edit" title="Edit"><span class="rnum">2</span><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><path d="M20 4L8.1 15.9M14.5 14.5L20 20M8.1 8.1L12 12"></path></svg><span class="rlbl" data-i18n="r_edit">Edit</span></button>
+<button class="rbtn" data-tab="batch" title="Batch"><span class="rnum">3</span><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h1M3 12h1M3 18h1"></path></svg><span class="rlbl" data-i18n="r_batch">Batch</span></button>
+<span class="rdiv"></span>
+<button class="rbtn" data-tab="set" title="Settings"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"></path></svg><span class="rlbl" data-i18n="r_set">Settings</span></button>
+<button class="rbtn" data-tab="log" title="Log"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z"></path><path d="M8 9h8M8 13h8M8 17h5"></path></svg><span class="rlbl" data-i18n="r_log">Log</span></button>
+    <div id="rfoot"><span id="rdot"></span><span id="rver"></span></div>
+  </nav>
 
-  <div id="upd"><b id="updtxt"></b><div id="updnotes" class="mute"></div>
-    <button id="updbtn" class="go" style="margin-top:6px" data-i18n="upd_btn">Update කරන්න</button></div>
+  <div id="main">
+    <div id="hdr"><div class="t"><span id="h_step">STEP 2 · EDIT</span><span id="h_title">AutoWed</span></div><span id="eng">engine…</span><span id="chip">CLAUDE</span></div>
+    <div id="upd"><b id="updtxt"></b><div id="updnotes" class="mute"></div><button id="updbtn" class="go" style="margin-top:6px" data-i18n="upd_btn">Update කරන්න</button></div>
 
-  <div class="sec">
-    <b data-i18n="s0">0 · Sync</b>
-    <div class="mute" style="margin-bottom:6px" data-i18n="s0_help">Project panel එකේ cameras, Zoom, DJI mic files (නැත්නම් ඒවා තියෙන bins) select කරලා ඔබන්න. Audio එකෙන් ගලපලා අලුත් "Synced Sequence" එකක් හදනවා.</div>
-    <button id="sync" data-i18n="sync_btn">Selected files Sync කරන්න</button>
-    <div id="syncinfo" class="mute" style="margin-top:6px"></div>
+    <div id="prog">
+      <div id="prow"><span id="pct">0%</span><span id="stage">Ready</span><span id="eta"></span></div>
+      <div id="bar"><div></div></div>
+      <div id="steps"><span data-s="prepare">Sequence</span><span data-s="audio">Audio</span><span data-s="analysis">Analysis</span><span data-s="finish">Finish</span></div>
+      <div id="ticks"><span id="tk0">--:--</span><span id="tk1"></span><span id="tk2">--:--</span></div>
+      <div id="lanes"></div>
+      <div id="strip"></div>
+      <div id="tiles">
+        <div class="tile"><b id="t_cuts">0</b><span>CUTS</span></div>
+        <div class="tile"><b id="t_avg">–</b><span>AVG SHOT</span></div>
+        <div class="tile"><b id="t_bpm">–</b><span>BPM</span></div>
+        <div class="tile"><b id="t_mom">0</b><span>MOMENTS</span></div>
+      </div>
+      <span id="legend"></span><span id="striplbl"></span>
+    </div>
+
+    <div id="wrap">
+      <div class="pane" id="p_sync">
+        <div class="card"><b data-i18n="s0_t">Project panel එකේ files / bins select කරන්න</b>
+          <div class="hint" data-i18n="s0_help">Cameras, Zoom H8, DJI mics, drone. Audio එකෙන් ගලපලා "Synced Sequence" එකක් හදනවා.</div></div>
+        <button id="sync" class="go" style="width:100%" data-i18n="sync_btn">Selected files Sync කරන්න ▶</button>
+        <div id="syncinfo" class="mute" style="margin-top:8px"></div>
+      </div>
+
+      <div class="pane" id="p_seq">
+        <div class="hint" style="margin:0 0 10px" data-i18n="s1_help">Sync කරපු timeline එක open කරලා edit කරන්න ඕන කොටසට In (I) සහ Out (O) දාන්න. AutoWed edit කරන්නේ ඒ timeline එකේම, ඒ කොටස විතරයි.</div>
+        <div class="btnrow"><button id="read" data-i18n="read_btn">Sequence කියවන්න</button><button id="rtest" data-i18n="rtest_btn">Razor test</button></div>
+        <div id="seqinfo" class="mute" style="margin-top:8px"></div>
+        <div id="tracks" style="margin-top:6px"></div>
+      </div>
+
+      <div class="pane on" id="p_edit">
+        <span class="lbl" data-i18n="l_event">EVENT</span>
+        <div class="pills" id="evpills"></div>
+        <select id="event" style="display:none"></select>
+        <span class="lbl" data-i18n="l_etype">EDIT වර්ගය</span>
+        <div class="seg2" id="kindseg"><button data-k="multicam">Multicam</button><button data-k="stacked">Manual cutting</button></div>
+        <select id="etype" style="display:none"><option value="multicam">Multicamera edit</option><option value="stacked">Manual cutting (stacked)</option></select>
+        <div class="hint" id="etypehint"></div>
+        <span class="lbl" data-i18n="l_moments">MOMENTS &amp; CHECKS</span>
+        <div id="mlist"><div class="mute" data-i18n="m_empty">Edit එක ඉවර වුණාම මෙතන පෙන්නනවා.</div></div>
+        <span class="lbl">LOG</span>
+        <div id="minilog"></div>
+      </div>
+
+      <div class="pane" id="p_batch">
+        <div class="hint" style="margin:0 0 10px" data-i18n="s3_help">In/Out දාලා event එක තෝරලා ලිස්ට් එකට දාන්න, නැත්නම් Events හොයලා markers වලින් ලිස්ට් එක හදන්න. ඊට පස්සේ එක පාරක් ඔබලා ඔක්කොම edit කරන්න.</div>
+        <div class="btnrow"><button id="qadd" data-i18n="qadd_btn">+ In/Out</button><button id="evfind" data-i18n="evfind_btn">Events හොයන්න</button><button id="qclear" data-i18n="qclear_btn">Clear</button></div>
+        <div id="queue" style="margin-top:8px"></div>
+        <button id="qrun" class="go" style="width:100%; margin-top:6px" data-i18n="qrun_btn">ඔක්කොම Edit ▶</button>
+      </div>
+
+      <div class="pane" id="p_set">
+        <span class="lbl" data-i18n="l_cut">CUTTING</span>
+        <div class="row"><label data-i18n="l_min">අවම shot (s)</label><input id="min_shot" type="text" placeholder="auto"></div>
+        <div class="row"><label data-i18n="l_max">උපරිම shot (s)</label><input id="max_shot" type="text" placeholder="auto"></div>
+        <div class="row"><label data-i18n="l_trim">Smart trim</label><select id="x_trim"><option value="on" data-i18n="o_on">ඔව් (හිස් මුල/අග off)</option><option value="off" data-i18n="o_off">එපා</option></select></div>
+        <div class="row"><label>Live cuts</label><select id="x_live"><option value="live" selected>Timeline එකේ live වැටෙන්න</option><option value="end">අන්තිමට එකපාර (crash වෙනවා නම්)</option></select></div>
+        <div class="row"><label data-i18n="l_stab">Shaky කෑලි</label><select id="stab"><option value="off" data-i18n="o_stab_off">Stabilize කරන්න එපා</option><option value="mark" data-i18n="o_stab_mark">Marker විතරක්</option><option value="warp" selected data-i18n="o_stab_warp">Warp Stabilizer දාන්න</option></select></div>
+        <div class="row"><label data-i18n="l_stabthr">Shake සීමාව</label><input id="stab_thr" type="text" placeholder="1.5"></div>
+        <div class="row"><label data-i18n="l_trans">Event transitions</label><select id="x_trans"><option value="off" data-i18n="o_off">එපා</option><option value="on" data-i18n="o_trans_on">මුලට/අගට Cross Dissolve</option></select></div>
+        <div class="row"><label data-i18n="l_colors">Camera colors</label><button id="tlcol">Timeline colors: OFF</button></div>
+        <span class="lbl" data-i18n="l_audio">AUDIO &amp; COPY SEQUENCE</span>
+        <div class="row"><label data-i18n="l_sil">Silence කපන්න</label><select id="x_sil"><option value="off" data-i18n="o_off">එපා</option><option value="copy" data-i18n="o_sil_copy">Copy sequence එකේ කපන්න</option></select></div>
+        <div class="row"><label data-i18n="l_flash">White flash (frames)</label><input id="x_flash" type="text" placeholder="8"></div>
+        <div class="row"><label data-i18n="l_loud">Loudness</label><select id="x_loud"><option value="copy" data-i18n="o_loud_copy">Copy එකේ level හදන්න</option><option value="off" data-i18n="o_off">එපා</option></select></div>
+        <div class="row"><label data-i18n="l_mic">Best mic + gap fill</label><select id="x_mic"><option value="copy" data-i18n="o_mic_copy">Copy එකේ හොඳම mic එක</option><option value="off" data-i18n="o_off">එපා</option></select></div>
+        <span class="lbl">AI</span>
+        <div class="row"><label data-i18n="l_couple">Couple recognition</label><select id="x_couple"><option value="on" data-i18n="o_on2">ඔව්</option><option value="off" data-i18n="o_off">එපා</option></select></div>
+        <div class="row"><label data-i18n="l_qc">QC markers</label><select id="x_qc"><option value="on" data-i18n="o_qc_on">Moments, weak takes, clipping, mic gaps</option><option value="off" data-i18n="o_off">එපා</option></select></div>
+        <span class="lbl" data-i18n="s4">STUDIO</span>
+        <div class="row"><label data-i18n="l_preset">Preset</label><select id="st_list"><option value="" data-i18n="o_pick">— තෝරන්න —</option></select></div>
+        <div class="row"><label data-i18n="l_pname">නව නම</label><input id="st_name" type="text" placeholder="Endora style"></div>
+        <div class="btnrow"><button id="st_save" data-i18n="st_save">Preset save</button><button id="st_refresh" data-i18n="st_refresh">ලිස්ට් එක</button><button id="learn" data-i18n="learn_btn">මගේ වෙනස්කම් ඉගෙනගන්න</button><button id="stats" data-i18n="stats_btn">Stats</button></div>
+        <span class="lbl">APP</span>
+        <div class="btnrow"><button id="lang">EN</button><button id="dbg">Claude: OFF</button><button id="chk" data-i18n="chk_btn">Check update</button></div>
+        <div class="mute" style="margin-top:10px">Powered by <b style="color:#b48cff">Endora</b> · <span id="ver"></span></div>
+      </div>
+
+      <div class="pane" id="p_log"><div id="log"></div></div>
+    </div>
+
+    <div id="foot">
+      <button class="go" id="go" data-i18n="go_btn">Auto Edit ▶</button>
+      <button id="stop" class="stopbtn" style="display:none" data-i18n="stop_btn">■ Stop</button>
+      <button id="reset" title="Panel එක හිරවුණොත්: run වෙන jobs නවත්තලා panel එක මුල් තත්වයට ගේනවා">↺</button>
+    </div>
   </div>
-
-  <div class="sec">
-    <b data-i18n="s1">1 · Sequence</b>
-    <div class="mute" style="margin-bottom:6px" data-i18n="s1_help">Sync කරපු timeline එක open කරලා edit කරන්න ඕන කොටසට In (I) සහ Out (O) දාන්න. AutoWed edit කරන්නේ ඒ timeline එකේම, ඒ කොටස විතරයි.</div>
-    <button id="read" data-i18n="read_btn">Sequence කියවන්න</button> <button id="rtest" data-i18n="rtest_btn" title="Manual cutting එකේ cut කිරීම ඔබේ Premiere එකේ වැඩද කියලා පොඩි test sequence එකක බලනවා">Razor test</button>
-    <div id="seqinfo" class="mute" style="margin-top:6px"></div>
-    <div id="tracks"></div>
-  </div>
-
-  <div class="sec">
-    <b data-i18n="s2">2 · Edit</b>
-    <div class="row"><label data-i18n="l_event">Event</label><select id="event"></select></div>
-    <div class="row"><label data-i18n="l_etype">Edit වර්ගය</label>
-      <select id="etype">
-        <option value="multicam">Multicamera edit</option>
-        <option value="stacked">Manual cutting (stacked)</option>
-      </select></div>
-    <div class="hint" id="etypehint"></div>
-    <div class="row"><label data-i18n="l_min">අවම shot (s)</label><input id="min_shot" type="text" placeholder="auto"></div>
-    <div class="row"><label data-i18n="l_max">උපරිම shot (s)</label><input id="max_shot" type="text" placeholder="auto"></div>
-    <div class="row"><label data-i18n="l_stab">Shaky කෑලි</label><select id="stab">
-        <option value="off" data-i18n="o_stab_off">Stabilize කරන්න එපා</option>
-        <option value="mark" data-i18n="o_stab_mark">Marker විතරක්</option>
-        <option value="warp" selected data-i18n="o_stab_warp">Warp Stabilizer දාන්න</option>
-      </select></div>
-    <div class="row"><label data-i18n="l_stabthr">Shake සීමාව</label><input id="stab_thr" type="text" placeholder="1.5"></div>
-    <div class="row"><label data-i18n="l_colors">Camera colors</label><button id="tlcol" title="Manual cutting: ඔබේ timeline එකේ clips වලටත් camera colors (project එක තත්පර කිහිපයකට close වෙනවා)">Timeline colors: OFF</button></div>
-  </div>
-
-  <details class="sec" id="xsec">
-    <summary data-i18n="s_x">Extras (silence, audio, faces, checks)</summary>
-    <div class="row"><label data-i18n="l_sil">Silence කපන්න</label><select id="x_sil">
-        <option value="off" data-i18n="o_off">එපා</option><option value="copy" data-i18n="o_sil_copy">Copy sequence එකේ කපන්න</option></select></div>
-    <div class="row"><label data-i18n="l_flash">White flash (frames)</label><input id="x_flash" type="text" placeholder="8"></div>
-    <div class="row"><label data-i18n="l_trim">Smart trim</label><select id="x_trim">
-        <option value="on" data-i18n="o_on">ඔව් (හිස් මුල/අග off)</option><option value="off" data-i18n="o_off">එපා</option></select></div>
-    <div class="row"><label data-i18n="l_trans">Event transitions</label><select id="x_trans">
-        <option value="off" data-i18n="o_off">එපා</option><option value="on" data-i18n="o_trans_on">මුලට/අගට Cross Dissolve</option></select></div>
-    <div class="row"><label data-i18n="l_loud">Loudness</label><select id="x_loud">
-        <option value="copy" data-i18n="o_loud_copy">Copy එකේ level හදන්න</option><option value="off" data-i18n="o_off">එපා</option></select></div>
-    <div class="row"><label data-i18n="l_mic">Best mic + gap fill</label><select id="x_mic">
-        <option value="copy" data-i18n="o_mic_copy">Copy එකේ හොඳම mic එක</option><option value="off" data-i18n="o_off">එපා</option></select></div>
-    <div class="row"><label data-i18n="l_couple">Couple recognition</label><select id="x_couple">
-        <option value="on" data-i18n="o_on2">ඔව්</option><option value="off" data-i18n="o_off">එපා</option></select></div>
-    <div class="row"><label data-i18n="l_qc">QC markers</label><select id="x_qc">
-        <option value="on" data-i18n="o_qc_on">Moments, weak takes, clipping, mic gaps</option><option value="off" data-i18n="o_off">එපා</option></select></div>
-  </details>
-
-  <div style="display:flex; align-items:center; gap:6px">
-    <button class="go" id="go" data-i18n="go_btn">Auto Edit ▶</button>
-    <button id="stop" class="stopbtn" style="display:none" data-i18n="stop_btn">■ Stop</button>
-    <span style="flex:1"></span>
-    <button id="reset" data-i18n="reset_btn" title="Panel එක හිරවුණොත්: run වෙන jobs නවත්තලා panel එක මුල් තත්වයට ගේනවා">↺ Reset</button>
-  </div>
-
-  <div class="sec" style="margin-top:8px">
-    <b data-i18n="s3">3 · Batch (events කිහිපයක් එකට)</b>
-    <div class="mute" style="margin-bottom:6px" data-i18n="s3_help">In/Out දාලා event එක තෝරලා ලිස්ට් එකට දාන්න, නැත්නම් Events හොයලා markers වලින් ලිස්ට් එක හදන්න. ඊට පස්සේ එක පාරක් ඔබලා ඔක්කොම edit කරන්න.</div>
-    <button id="qadd" data-i18n="qadd_btn">In/Out ලිස්ට් එකට +</button> <button id="evfind" data-i18n="evfind_btn" title="Timeline එකේ audio එකෙන් speeches, ගාථා, music, බෙර කොටස් හොයලා markers දානවා">Events හොයන්න</button>
-    <div id="queue" style="margin-top:6px"></div>
-    <button id="qrun" class="go" style="margin-top:6px" data-i18n="qrun_btn">ලිස්ට් එක Edit කරන්න ▶</button> <button id="qclear" data-i18n="qclear_btn">Clear</button>
-  </div>
-
-  <details class="sec">
-    <summary data-i18n="s4">Studio (presets, learn, stats)</summary>
-    <div class="row"><label data-i18n="l_preset">Preset</label><select id="st_list"><option value="" data-i18n="o_pick">— තෝරන්න —</option></select></div>
-    <div class="row"><label data-i18n="l_pname">නව නම</label><input id="st_name" type="text" placeholder="Endora style"></div>
-    <div class="btnrow"><button id="st_save" data-i18n="st_save">Preset save</button><button id="st_refresh" data-i18n="st_refresh">ලිස්ට් එක</button>
-      <button id="learn" data-i18n="learn_btn" title="Manual cutting edit එකට පස්සේ ඔබ Shift+E එකෙන් කරපු වෙනස්කම් වලින් ඔබේ shot දිග ඉගෙනගන්නවා">මගේ වෙනස්කම් ඉගෙනගන්න</button>
-      <button id="stats" data-i18n="stats_btn">Stats</button></div>
-  </details>
-
-  <div id="prog">
-    <div id="prow"><span id="pct">0%</span><span id="stage">…</span><span id="eta"></span></div>
-    <div id="bar"><div></div></div>
-    <div id="steps"><span data-s="prepare">Sequence</span><span data-s="audio">Audio</span><span data-s="analysis">Analysis + cuts</span><span data-s="finish">ඉවර කිරීම</span></div>
-    <div id="strip" style="display:flex; margin-top:8px; border-radius:3px; overflow:hidden; background:#1b1b1b;"></div>
-    <div style="display:flex; margin-top:3px; font-size:11px;"><span id="legend" style="flex:1"></span><span id="striplbl" class="mute"></span></div>
-  </div>
-
-  <div id="log" style="margin-top:8px"></div>
-
-  <div id="foot"><span class="mute" style="flex:1">Powered by <b style="color:#d4a24c">Endora</b></span><span class="mute" id="ver"></span><button id="dbg" title="Claude MCP debug bridge">Claude: OFF</button><button id="chk" data-i18n="chk_btn">Check update</button></div>
 </div>
-  <script src="main.js"></script>
+<script src="main.js"></script>
 </body>
 </html>

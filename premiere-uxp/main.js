@@ -86,6 +86,16 @@ function log(msg, cls) {
   line.textContent = msg;
   el.appendChild(line);
   el.scrollTop = el.scrollHeight;
+  const m = /~(\d+) BPM/.exec(msg);
+  if (m && $("t_bpm")) $("t_bpm").textContent = m[1];
+  const ml = $("minilog");
+  if (ml) {
+    const d = document.createElement("div");
+    if (cls) d.className = cls;
+    d.textContent = msg;
+    ml.appendChild(d);
+    while (ml.children.length > 5) ml.removeChild(ml.children[0]);
+  }
 }
 
 
@@ -102,13 +112,15 @@ let lastPingErr = "";
 async function ping() {
   try {
     const p = await call("GET", "/api/ping", null, transport === "file" ? 4000 : 9000);
-    $("eng").textContent = `● engine v${p.version} · GPU ${p.nvdec ? "ON" : "OFF"} · ${transport}`;
+    $("eng").textContent = `GPU ${p.nvdec ? "ON" : "OFF"} · ${transport}`;
     $("eng").className = "ok";
+    if ($("rdot")) { $("rdot").className = "ok"; $("rdot").title = "engine v" + p.version; }
     if (!$("event").options.length) loadEvents();
     return true;
   } catch (e) {
-    $("eng").textContent = "● engine offline";
+    $("eng").textContent = "engine offline";
     $("eng").className = "bad";
+    if ($("rdot")) $("rdot").className = "";
     lastPingErr = `${lastNetErr} | ${e}`;
     return false;
   }
@@ -126,6 +138,11 @@ async function loadEvents() {
     o.textContent = ev.si + (ev.en && ev.en !== ev.si ? "  ·  " + ev.en : "");
     sel.appendChild(o);
   }
+  let last = "";
+  try { last = localStorage.getItem("autowed.event") || ""; } catch (e) {}
+  sel.value = list.some((e) => e.id === last) ? last : list[0].id;
+  if (sel.selectedIndex < 0) sel.selectedIndex = 0;
+  renderPills();
 }
 
 async function checkUpdate(manual) {
@@ -280,6 +297,10 @@ async function readSequence(rangeOverride) {
 }
 
 // ---------- Premiere edit helpers ----------
+// Premiere crashes when edits arrive back to back while it is still redrawing the timeline:
+// every live edit is followed by a short pause (see breathe()).
+let LIVE_GAP_MS = 60;
+async function breathe() { await sleep(LIVE_GAP_MS); }
 function transact(project, label, makeActions) {
   let ok = false;
   project.lockedAccess(() => {
@@ -526,12 +547,12 @@ function makeApplier(project, target, kind, cutTracks, trackOfCam, rangeT0, rang
   let enabledUntil = rangeT0;
   const targetGuid = target.guid.toString();
   const tgt = async () => (target = await freshSeq(project, target, targetGuid));
-  let followed = false;
+  let followed = false, lastFollow = 0;
   async function cutAt(times) {
     for (const t of times) {
       const key = t.toFixed(3);
       if (done.has(key) || t <= 0.001) continue;
-      try { await razorTracks(project, await tgt(), cutTracks, t, native); }
+      try { await razorTracks(project, await tgt(), cutTracks, t, native); await breathe(); }
       catch (e) {
         // one more try with everything fetched again; if it still fails, skip only this cut
         await sleep(150);
@@ -571,6 +592,7 @@ function makeApplier(project, target, kind, cutTracks, trackOfCam, rangeT0, rang
         try { cur = await it.isDisabled(); } catch (e) {}
         if (cur !== x.want) transact(project, "AutoWed angles", () => [it.createSetDisabledAction(x.want)]);
       });
+      await breathe();
     }
     enabledUntil = processed;
   }
@@ -586,7 +608,11 @@ function makeApplier(project, target, kind, cutTracks, trackOfCam, rangeT0, rang
         const seq = await tgt();
         if (!followed) { followed = true; try { await project.openSequence(seq); } catch (e) {} }
         const last = cuts.length ? Math.min(Math.max(...cuts), rangeT1) : until;
-        if (typeof seq.setPlayerPosition === "function") await seq.setPlayerPosition(tt(last));
+        // moving the playhead makes Premiere redraw; only now and then, and always at the end
+        if (typeof seq.setPlayerPosition === "function" && (final || Date.now() - lastFollow > 8000)) {
+          lastFollow = Date.now();
+          await seq.setPlayerPosition(tt(last));
+        }
       } catch (e) {}
     },
   };
@@ -611,8 +637,44 @@ function renderStrip(segments, t0, t1, until) {
   rest.style.flex = "1"; rest.style.height = "16px"; rest.style.backgroundColor = "#1b1b1b";
   strip.appendChild(rest);
   $("striplbl").textContent = `Cuts ${Math.max(0, segments.length - 1)} · ${fmt((until || t0) - t0)} / ${fmt(total)}`;
+  renderLanes(segments, t0, t1, until);
+}
+
+// live timeline: one lane per camera, the chosen pieces drawn where they fall in the In/Out range
+let CAMN = [];
+function renderLanes(segments, t0, t1, until) {
+  const box = $("lanes");
+  if (!box) return;
+  const total = Math.max(0.001, t1 - t0);
+  box.innerHTML = "";
+  const n = Math.max(CAMN.length, ...segments.map((x) => x.cam + 1), 0);
+  const mk = (label, color) => {
+    const row = document.createElement("div"); row.className = "lane";
+    const ln = document.createElement("span"); ln.className = "ln"; ln.textContent = label; ln.style.color = color;
+    const lt = document.createElement("div"); lt.className = "lt";
+    row.appendChild(ln); row.appendChild(lt); box.appendChild(row);
+    return lt;
+  };
+  const head = until != null ? Math.max(0, Math.min(1, ((until || t0) - t0) / total)) : 0;
+  for (let c = 0; c < n; c++) {
+    const lt = mk("CAM " + (c + 1), CAM_COLORS[c % CAM_COLORS.length]);
+    for (const sg of segments) {
+      if (sg.cam !== c) continue;
+      const d = document.createElement("div"); d.className = "sg";
+      d.style.left = ((sg.start - t0) / total * 100).toFixed(3) + "%";
+      d.style.width = (Math.max(0.15, (sg.end - sg.start) / total * 100)).toFixed(3) + "%";
+      d.style.backgroundColor = CAM_COLORS[c % CAM_COLORS.length];
+      lt.appendChild(d);
+    }
+    const ph = document.createElement("div"); ph.className = "ph"; ph.style.left = (head * 100).toFixed(2) + "%"; lt.appendChild(ph);
+  }
+  $("tk0").textContent = fmt(t0); $("tk1").textContent = fmt((t0 + t1) / 2); $("tk2").textContent = fmt(t1);
+  const real = segments.filter((x) => x.cam >= 0);
+  $("t_cuts").textContent = String(Math.max(0, real.length - 1));
+  $("t_avg").textContent = real.length ? (real.reduce((a, x) => a + x.end - x.start, 0) / real.length).toFixed(1) + "s" : "–";
 }
 function renderLegend(names) {
+  CAMN = names.slice();
   $("legend").innerHTML = "";
   names.forEach((n, i) => {
     const sw = document.createElement("span");
@@ -751,8 +813,11 @@ async function resetPanel() {
   busy = false; STOPPING = false; CUR_JOB = null;
   for (const id of ["go", "sync", "qrun", "evfind", "rtest", "read"]) if ($(id)) $(id).disabled = false;
   showStop(false);
-  if ($("prog")) $("prog").style.display = "none";
-  for (const id of ["strip", "legend"]) if ($(id)) $(id).innerHTML = "";
+  for (const id of ["strip", "legend", "lanes", "minilog"]) if ($(id)) $(id).innerHTML = "";
+  if ($("pct")) $("pct").textContent = "0%";
+  if ($("stage")) $("stage").textContent = "Ready";
+  if ($("eta")) $("eta").textContent = "";
+  for (const [id, v] of [["t_cuts", "0"], ["t_avg", "–"], ["t_bpm", "–"], ["t_mom", "0"]]) if ($(id)) $(id).textContent = v;
   for (const id of ["striplbl", "syncinfo"]) if ($(id)) $(id).textContent = "";
   if ($("log")) $("log").innerHTML = "";
   for (const q of QUEUE) if (q.status === "running") q.status = "";
@@ -813,7 +878,9 @@ async function runAutoEdit(jobOpts) {
   log(`Auto edit: ${evName} · ${kind === "multicam" ? "Multicamera" : "Manual cutting"} · ${fmt(range[0])} → ${fmt(range[1])}`);
   const job = (await call("POST", "/api/edit", body)).job;
   CUR_JOB = job;
-  let shown = 0, lastSegCount = -1, applyFails = 0;
+  let shown = 0, lastSegCount = -1, applyFails = 0, lastApply = 0, appliedCount = 0;
+  const live = !$("x_live") || $("x_live").value !== "end";
+  if (!live) log("Live cuts OFF: analysis ඉවර වුණාම cuts ඔක්කොම එකපාර දානවා (Premiere එකට ආරක්ෂිතයි).", "mute");
   while (true) {
     await sleep(1000);
     let j;
@@ -825,7 +892,12 @@ async function runAutoEdit(jobOpts) {
     if (j.segments && j.segments.length !== lastSegCount) {
       lastSegCount = j.segments.length;
       renderStrip(j.segments, range[0], range[1], j.committed_until || range[0]);
-      if (applier) {
+    }
+    // live cuts in calm batches: at least 6 s apart and a few new pieces, never one per poll
+    const newPieces = (j.segments || []).length - appliedCount;
+    if (live && applier && j.status !== "done" && newPieces > 0 && (Date.now() - lastApply > 6000) && (newPieces >= 3 || Date.now() - lastApply > 15000)) {
+      appliedCount = j.segments.length; lastApply = Date.now();
+      {
         try { await applier.apply(j.segments, j.committed_until || range[0], false); applyFails = 0; }
         catch (e) {
           // one bad round does not end the live edit: the next round picks up from where it is
@@ -833,8 +905,8 @@ async function runAutoEdit(jobOpts) {
           log("Timeline cut: " + (e && e.message || e) + (applyFails < 4 ? " — ඊළඟ වටයේ ආයෙ උත්සාහ කරනවා" : ""), "warn");
           if (e && e.stack) log("  " + String(e.stack).split("\n").slice(0, 4).join(" | "), "mute");
           if (applyFails >= 4) {
-            log("Live cuts නැවැත්තුවා. Analysis එක ඉවර වෙනකම් යනවා (strip එකේ ප්‍රතිඵලය බලන්න).", "warn");
-            applier = null;
+            log("Live cuts නවත්තලා analysis ඉවර වුණාම cuts ඔක්කොම එකපාර දානවා.", "warn");
+            lastApply = Infinity;
           }
         }
       }
@@ -1441,6 +1513,7 @@ function gatherExtras() {
 }
 
 async function qcReport(project, sd, result, cams, kind) {
+  try { renderMoments(result); } catch (e) {}
   const L = result.loudness;
   if (L) log(`Loudness: ${L.lufs} LUFS (ඉලක්කය ${L.target}) → ${L.gain_db > 0 ? "+" : ""}${L.gain_db} dB${gatherExtras().loudness ? " copy sequence එකේ දැම්මා" : ""}`, "mute");
   if (result.trim) log(`Smart trim: ${fmt(result.range[0])}–${fmt(result.trim[0])} සහ ${fmt(result.trim[1])}–${fmt(result.range[1])} හිස් කොටස් off කළා.`, "ok");
@@ -1536,7 +1609,7 @@ async function showStats() {
 }
 
 // studio presets: every panel setting, saved as a file others can copy (Documents\AutoWed Presets)
-const PRESET_IDS = ["event", "etype", "min_shot", "max_shot", "stab", "stab_thr", "x_sil", "x_flash", "x_trim", "x_trans", "x_loud", "x_mic", "x_couple", "x_qc"];
+const PRESET_IDS = ["event", "etype", "x_live", "min_shot", "max_shot", "stab", "stab_thr", "x_sil", "x_flash", "x_trim", "x_trans", "x_loud", "x_mic", "x_couple", "x_qc"];
 let STUDIO = [];
 async function presetsRefresh(quiet) {
   try {
@@ -1603,3 +1676,85 @@ if ($("st_list")) $("st_list").onchange = () => presetApply($("st_list").value);
 if ($("lang")) $("lang").onclick = () => { LANG = LANG === "en" ? "si" : "en"; try { localStorage.setItem("autowed.lang", LANG); } catch (e) {} applyLang(); };
 try { applyLang(); } catch (e) {}
 setTimeout(() => { presetsRefresh(true); }, 2500);
+
+
+// =====================================================================================
+// New layout: left menu (steps + settings), event pills, mode switch, moments list
+// =====================================================================================
+const TABS = {
+  sync: ["STEP 0 · SYNC", "Sync by audio"], seq: ["STEP 1 · SEQUENCE", "Sequence"], edit: ["STEP 2 · EDIT", "Auto Edit"],
+  batch: ["STEP 3 · BATCH", "Wedding list"], set: ["SETTINGS", "Settings"], log: ["LOG", "Log"],
+};
+function showTab(t) {
+  for (const b of document.querySelectorAll(".rbtn")) b.className = "rbtn" + (b.getAttribute("data-tab") === t ? " on" : "");
+  for (const p of document.querySelectorAll(".pane")) p.className = "pane" + (p.id === "p_" + t ? " on" : "");
+  const h = TABS[t] || ["", ""];
+  if ($("h_step")) $("h_step").textContent = h[0];
+  if ($("h_title")) $("h_title").textContent = t === "edit" && seqData ? seqData.name : h[1];
+  try { localStorage.setItem("autowed.tab", t); } catch (e) {}
+}
+for (const b of document.querySelectorAll(".rbtn")) b.onclick = () => showTab(b.getAttribute("data-tab"));
+
+function renderPills() {
+  const box = $("evpills");
+  if (!box) return;
+  box.innerHTML = "";
+  const sel = $("event");
+  for (const o of sel.options) {
+    const b = document.createElement("button");
+    b.className = "pill" + (o.value === sel.value ? " on" : "");
+    b.textContent = o.textContent.split("  ·  ")[0];
+    b.onclick = () => { sel.value = o.value; try { localStorage.setItem("autowed.event", o.value); } catch (e) {} renderPills(); };
+    box.appendChild(b);
+  }
+}
+function renderKind() {
+  const et = $("etype");
+  if (et.selectedIndex < 0) et.value = "multicam";
+  for (const b of document.querySelectorAll("#kindseg button")) b.className = b.getAttribute("data-k") === et.value ? "on" : "";
+  if ($("etypehint")) $("etypehint").textContent = HINTS[et.value] || "";
+}
+for (const b of document.querySelectorAll("#kindseg button")) b.onclick = () => {
+  $("etype").value = b.getAttribute("data-k");
+  try { localStorage.setItem("autowed.kind", $("etype").value); } catch (e) {}
+  renderKind();
+};
+try { const k = localStorage.getItem("autowed.kind"); if (k) $("etype").value = k; } catch (e) {}
+renderKind();
+
+// moments & checks after an edit, in the Edit page
+function renderMoments(result) {
+  const box = $("mlist");
+  if (!box) return;
+  box.innerHTML = "";
+  const KIND = { applause: "අත්පොළසන් / cheer", smile: "සිනහ", hug: "බදාගැනීම / emotion" };
+  const items = [];
+  for (const m of result.moments || []) items.push(["★ " + (KIND[m.kind] || m.kind) + (m.cam != null ? " · Cam " + (m.cam + 1) : ""), m.time, "#b48cff"]);
+  for (const b of (result.bad || []).slice(0, 8)) items.push(["! " + b.name + ": " + b.why, b.start, "#e8a04a"]);
+  for (const c of (result.clipping || []).slice(0, 4)) items.push(["! Audio clipping " + c.name, c.start, "#e8685a"]);
+  for (const g of (result.mic_gaps || []).slice(0, 4)) items.push(["! Mic drop-out " + g.name, g.start, "#e8a04a"]);
+  items.sort((a, b) => a[1] - b[1]);
+  if ($("t_mom")) $("t_mom").textContent = String((result.moments || []).length);
+  if (!items.length) { const d = document.createElement("div"); d.className = "mute"; d.textContent = "Moments / checks නැහැ."; box.appendChild(d); return; }
+  for (const [txt, t, col] of items.slice(0, 14)) {
+    const row = document.createElement("div"); row.className = "item";
+    const a = document.createElement("span"); a.textContent = txt; a.style.color = col;
+    const b = document.createElement("span"); b.textContent = fmt(t); b.className = "mute";
+    row.appendChild(a); row.appendChild(b); box.appendChild(row);
+  }
+}
+
+// move to the page that shows what is running
+(function wrapForTabs() {
+  const g = $("go").onclick; $("go").onclick = () => { showTab("edit"); return g && g(); };
+  const sy = $("sync").onclick; $("sync").onclick = () => { showTab("sync"); return sy && sy(); };
+  const qr = $("qrun").onclick; $("qrun").onclick = () => { showTab("edit"); return qr && qr(); };
+})();
+if ($("rver")) $("rver").textContent = "v" + PANEL_VERSION;
+try { showTab(localStorage.getItem("autowed.tab") || "edit"); } catch (e) { showTab("edit"); }
+
+// Live cuts on/off is remembered (off = every cut at the end, the safe way if Premiere crashes)
+if ($("x_live")) {
+  try { const v = localStorage.getItem("autowed.live"); if (v) $("x_live").value = v; } catch (e) {}
+  $("x_live").addEventListener("change", () => { try { localStorage.setItem("autowed.live", $("x_live").value); } catch (e) {} });
+}
