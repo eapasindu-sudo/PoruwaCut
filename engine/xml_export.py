@@ -107,7 +107,7 @@ def build_xml(project: dict, result: dict, out_path: str, layout: str = "stacked
     files = _Files()
     cid = [0]
 
-    def clipitem(cl, a, b, enabled=True, audio_track=None):
+    def clipitem(cl, a, b, enabled=True, audio_track=None, cam=None):
         cid[0] += 1
         mi = files.info.get(cl["path"]) or probe(cl["path"])
         st, en = seq_frame(a), seq_frame(b)
@@ -120,6 +120,9 @@ def build_xml(project: dict, result: dict, out_path: str, layout: str = "stacked
         x = (f'<clipitem id="clipitem-{cid[0]}"><name>{name}</name>'
              f'<enabled>{"TRUE" if enabled else "FALSE"}</enabled><duration>{fdur}</duration>{_rate(fps)}'
              f"<start>{st}</start><end>{en}</end><in>{src_in}</in><out>{src_out}</out>{files.ref(cl['path'])}")
+        if cam is not None:
+            from .prproj import LABEL_NAMES, label_index_for_cam
+            x += f"<labels><label2>{LABEL_NAMES[label_index_for_cam(cam)]}</label2></labels>"
         if audio_track is not None:
             x += f"<sourcetrack><mediatype>audio</mediatype><trackindex>{audio_track}</trackindex></sourcetrack>"
         return x + "</clipitem>"
@@ -132,14 +135,14 @@ def build_xml(project: dict, result: dict, out_path: str, layout: str = "stacked
             if c is None:
                 continue
             for cl, x, y in clip_at(c, a, b):
-                items.append(clipitem(cl, x, y))
+                items.append(clipitem(cl, x, y, cam=c))
         vtracks.append("".join(items))
     else:
         for c in range(C):
             items = []
             for a, b, ch in pieces:
                 for cl, x, y in clip_at(c, a, b):
-                    items.append(clipitem(cl, x, y, enabled=(ch == c)))
+                    items.append(clipitem(cl, x, y, enabled=(ch == c), cam=c))
             vtracks.append("".join(items))
 
     def pieces_of(clips, a, b):

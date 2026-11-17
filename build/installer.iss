@@ -45,6 +45,7 @@ Source: "ffmpeg\ffmpeg.exe"; DestDir: "{app}\engine\ffmpeg"; Flags: ignoreversio
 Source: "ffmpeg\ffprobe.exe"; DestDir: "{app}\engine\ffmpeg"; Flags: ignoreversion
 Source: "ffmpeg\LICENSE.txt"; DestDir: "{app}\engine\ffmpeg"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\dist\PoruwaCut.ccx"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\AutoWedMCP.exe"; DestDir: "{app}\mcp"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
@@ -57,6 +58,8 @@ Name: "{userstartup}\AutoWed Engine"; Filename: "{app}\engine\PoruwaCutEngine.ex
 [Run]
 ; 1) Premiere plugin through Adobe's own installer agent (silent, also on updates)
 Filename: "{code:UpiaPath}"; Parameters: "/install ""{app}\PoruwaCut.ccx"""; StatusMsg: "Installing the Premiere Pro plugin..."; Flags: runhidden waituntilterminated; Check: UpiaExists
+; 1b) Claude MCP bridge: add "autowed-premiere" to Claude desktop's config (if Claude desktop is installed)
+Filename: "{app}\mcp\AutoWedMCP.exe"; Parameters: "--register"; Flags: runhidden waituntilterminated
 ; 2) start the engine (also after a silent auto-update)
 Filename: "{app}\engine\PoruwaCutEngine.exe"; Flags: nowait
 ; 3) optional fallback: hand the .ccx to Creative Cloud / ZXP-UXP Installer
@@ -64,6 +67,8 @@ Filename: "{app}\PoruwaCut.ccx"; Description: "Open the plugin file (.ccx) - onl
 
 [UninstallRun]
 Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM PoruwaCutEngine.exe"; Flags: runhidden; RunOnceId: "KillEngine"
+Filename: "{app}\mcp\AutoWedMCP.exe"; Parameters: "--unregister"; Flags: runhidden; RunOnceId: "UnregMCP"
+Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM AutoWedMCP.exe"; Flags: runhidden; RunOnceId: "KillMCP"
 Filename: "{code:UpiaPath}"; Parameters: "/remove ""AutoWed"""; Flags: runhidden; Check: UpiaExists; RunOnceId: "RemovePlugin"
 Filename: "{code:UpiaPath}"; Parameters: "/remove ""PoruwaCut"""; Flags: runhidden; Check: UpiaExists; RunOnceId: "RemovePluginOld"
 
@@ -86,6 +91,8 @@ var
 begin
   { stop a running engine so its files can be replaced }
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM PoruwaCutEngine.exe', '', SW_HIDE, ewWaitUntilTerminated, rc);
+  { Claude desktop keeps the MCP bridge running; stop it so the file can be replaced (Claude restarts it) }
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM AutoWedMCP.exe', '', SW_HIDE, ewWaitUntilTerminated, rc);
   Sleep(800);
   Result := '';
 end;

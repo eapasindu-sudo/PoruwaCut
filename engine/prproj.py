@@ -248,7 +248,7 @@ def _frame_ticks(objs, e_uid):
 
 
 def build_multicam_cuts(src: str, dst: str, edit_seq: str, nest_seq: str, segments: list[dict],
-                        cam_tracks: list[int] | None = None) -> dict:
+                        cam_tracks: list[int] | None = None, colors: bool = True) -> dict:
     same_file = os.path.abspath(src) == os.path.abspath(dst)
     """Split every nest clip on the edit sequence's video tracks at the cut points and make each
     piece a multicam clip showing the chosen angle. segments: [{start, end, cam}] in nest time."""
@@ -264,6 +264,7 @@ def build_multicam_cuts(src: str, dst: str, edit_seq: str, nest_seq: str, segmen
     next_id = max([int(k) for k in objs if k.isdigit()] + [0]) + 1
     segs = sorted(segments, key=lambda s: s["start"])
     report = {"items": 0, "pieces": 0, "multicam": 0, "angles": {}}
+    known = _known_label_colors(root)
 
     def angle_of(cam):
         return cam_tracks[cam] if cam_tracks and cam < len(cam_tracks) else cam
@@ -340,6 +341,8 @@ def build_multicam_cuts(src: str, dst: str, edit_seq: str, nest_seq: str, segmen
                         _set_text(cl, "SelectedTrackIndex", int(ang))
                         report["multicam"] += 1
                         report["angles"][str(ang)] = report["angles"].get(str(ang), 0) + 1
+                        if colors:
+                            _set_label(p_clip, label_index_for_cam(cam), known)
                     else:  # outside the edited range: leave the piece as it was
                         for t, v in orig_flags.items():
                             x = cl.find(t)
@@ -367,3 +370,87 @@ def build_multicam_cuts(src: str, dst: str, edit_seq: str, nest_seq: str, segmen
     _save(root, tmp)
     os.replace(tmp, dst)
     return report
+
+
+# ---------- clip label colors (one color per camera) ----------
+# Premiere's 16 label slots; the panel shows the same order. A track item's label lives on its own
+# VideoClip: <Clip><Node><Properties><asl.clip.label.color/><asl.clip.label.name/>.
+LABEL_NAMES = ["Violet", "Iris", "Caribbean", "Lavender", "Cerulean", "Forest", "Rose", "Mango",
+               "Purple", "Blue", "Teal", "Magenta", "Tan", "Green", "Brown", "Yellow"]
+CAM_LABELS = [7, 2, 6, 5, 0, 15, 4, 11]          # Mango, Caribbean, Rose, Forest, Violet, Yellow, ...
+
+
+def label_index_for_cam(cam: int) -> int:
+    return CAM_LABELS[cam % len(CAM_LABELS)]
+
+
+def _known_label_colors(root) -> dict:
+    """label name -> color value as this project (this user's Premiere) writes it."""
+    out = {}
+    for props in root.iter("Properties"):
+        n, c = props.findtext("asl.clip.label.name"), props.findtext("asl.clip.label.color")
+        if n and c and n not in out:
+            out[n] = c
+    return out
+
+
+def _set_label(vclip_el, idx: int, known: dict):
+    cl = vclip_el.find("Clip")
+    if cl is None:
+        return False
+    node = cl.find("Node")
+    if node is None:
+        node = ET.Element("Node", {"Version": "1"})
+        cl.insert(0, node)
+    props = node.find("Properties")
+    if props is None:
+        props = ET.SubElement(node, "Properties", {"Version": "1"})
+    name = f"BE.Prefs.LabelColors.{idx}"
+    color = known.get(name)
+    ce = props.find("asl.clip.label.color")
+    if color is not None:
+        if ce is None:
+            ce = ET.SubElement(props, "asl.clip.label.color")
+        ce.text = color
+    elif ce is not None:
+        props.remove(ce)          # color unknown in this project: Premiere takes it from the name
+    ne = props.find("asl.clip.label.name")
+    if ne is None:
+        ne = ET.SubElement(props, "asl.clip.label.name")
+    ne.text = name
+    return True
+
+
+def _vclip_of(objs, item):
+    sub = objs.get(_ref(item, "SubClip"))
+    cref = sub.find("Clip") if sub is not None else None
+    return objs.get(cref.get("ObjectRef")) if cref is not None else None
+
+
+def label_camera_tracks(src: str, dst: str, edit_seq: str, cam_tracks: list[int], t0: float, t1: float) -> dict:
+    """Color every clip between t0 and t1 on each camera track with that camera's label."""
+    root = _load(src)
+    objs = _index(root)
+    known = _known_label_colors(root)
+    e_uids = _sequences(objs, edit_seq)
+    if not e_uids:
+        raise ValueError(f"edit sequence '{edit_seq}' not found in project")
+    a0, a1 = int(t0 * TICKS) - TICKS // 10, int(t1 * TICKS) + TICKS // 10
+    rep = {"labeled": 0}
+    for e_uid in e_uids:
+        tracks = _video_tracks(objs, e_uid)
+        for cam, ti in enumerate(cam_tracks):
+            if ti >= len(tracks):
+                continue
+            for k in _track_items(objs, tracks[ti]):
+                item = objs[k]
+                a, b = _num(item, ".//TrackItem/Start"), _num(item, ".//TrackItem/End")
+                if a < a0 or b > a1:
+                    continue
+                v = _vclip_of(objs, item)
+                if v is not None and _set_label(v, label_index_for_cam(cam), known):
+                    rep["labeled"] += 1
+    tmp = dst + ".autowed-tmp"
+    _save(root, tmp)
+    os.replace(tmp, dst)
+    return rep

@@ -76,7 +76,10 @@ async function call(method, path, body, timeoutMs = 8000) {
   return j;
 }
 
+const LOGBUF = [];
 function log(msg, cls) {
+  LOGBUF.push((cls ? `[${cls}] ` : "") + msg);
+  if (LOGBUF.length > 800) LOGBUF.splice(0, LOGBUF.length - 800);
   const el = $("log");
   const line = document.createElement("div");
   if (cls) line.className = cls;
@@ -323,8 +326,20 @@ async function uniqueName(project, base) {
 }
 
 const EPS = 0.02;
+// Premiere can invalidate script objects a moment AFTER an edit, not right away. An operation that
+// hits a dead object is simply done again with everything looked up fresh.
+const isStale = (e) => /no longer valid/i.test(String((e && e.message) || e));
+async function retryStale(fn, tries = 4) {
+  for (let i = 0; ; i++) {
+    try { return await fn(); }
+    catch (e) { if (!isStale(e) || i >= tries - 1) throw e; await sleep(150 * (i + 1)); }
+  }
+}
 async function itemsOf(track) {
-  if (typeof track === "function") track = await track();
+  if (typeof track === "function") { const get = track; return retryStale(async () => itemsOfTrack(await get())); }
+  return itemsOfTrack(track);
+}
+async function itemsOfTrack(track) {
   const out = [];
   for (const it of track.getTrackItems(ppro.Constants.TrackItemType.CLIP, false)) {
     out.push({ it, a: (await it.getStartTime()).seconds, b: (await it.getEndTime()).seconds });
@@ -368,8 +383,8 @@ const locator = (track, win, avoid) => async () => {
 
 async function setInAdaptive(project, getIt, want) {
   // set the source in-point; if Premiere interprets the value on another time base, learn it
-  const setTo = async (x) => { const it = await getIt(); transact(project, "AutoWed cut", () => [it.createSetInPointAction(tt(x))]); };
-  const readIn = async () => (await (await getIt()).getInPoint()).seconds;
+  const setTo = (x) => retryStale(async () => { const it = await getIt(); transact(project, "AutoWed cut", () => [it.createSetInPointAction(tt(x))]); });
+  const readIn = () => retryStale(async () => (await (await getIt()).getInPoint()).seconds);
   let x = want;
   await setTo(x);
   let r = await readIn();
@@ -395,16 +410,18 @@ let fixOrder = null;
 
 async function applyField(project, getIt, f, want) {
   if (f === "in") return setInAdaptive(project, getIt, want.inp);
-  const it = await getIt();
-  if (f === "start") transact(project, "AutoWed cut", () => [it.createSetStartAction(tt(want.a))]);
-  if (f === "end") transact(project, "AutoWed cut", () => [it.createSetEndAction(tt(want.b))]);
+  return retryStale(async () => {
+    const it = await getIt();
+    if (f === "start") transact(project, "AutoWed cut", () => [it.createSetStartAction(tt(want.a))]);
+    if (f === "end") transact(project, "AutoWed cut", () => [it.createSetEndAction(tt(want.b))]);
+  });
 }
 const fieldOk = (c, want, f) => f === "in" ? Math.abs(c.inp - want.inp) <= 0.004
   : f === "start" ? Math.abs(c.a - want.a) <= 0.002 : Math.abs(c.b - want.b) <= 0.002;
 const allOk = (c, want) => fieldOk(c, want, "in") && fieldOk(c, want, "start") && fieldOk(c, want, "end");
 
 async function fixItem(project, getIt, want) {
-  const read = async () => readTI(await getIt());
+  const read = () => retryStale(async () => readTI(await getIt()));
   let c = await read();
   if (allOk(c, want)) return c;
   let orders = fixOrder ? [fixOrder, ...FIX_ORDERS.filter((o) => o !== fixOrder)] : FIX_ORDERS.slice();
@@ -440,18 +457,20 @@ async function emulatedRazor(project, seq, vIndex, t) {
   const g = seq.guid.toString();
   const seqNow = async () => (seq = await freshSeq(project, seq, g));
   const track = async () => (await seqNow()).getVideoTrack(vIndex);
-  const hit = (await itemsOf(track)).find((x) => x.a < t - EPS && t + EPS < x.b);
-  if (!hit) return false;
-  const { a, b } = hit;
-  const o = await readTI(hit.it);
+  const first = await retryStale(async () => {
+    const h = (await itemsOf(track)).find((x) => x.a < t - EPS && t + EPS < x.b);
+    return h ? { a: h.a, b: h.b, o: await readTI(h.it) } : null;
+  });
+  if (!first) return false;
+  const { a, b, o } = first;
   const rate = o.out > o.inp && b > a ? (o.out - o.inp) / (b - a) : 1;   // source seconds per timeline second
   const srcAt = (time) => o.inp + (time - a) * rate;
   const left = t - a, right = b - t;
-  const cloneAction = async (win, offset) => {
+  const cloneAction = (win, offset) => retryStale(async () => {
     const it = await locate(track, win);
     const editor = ppro.SequenceEditor.getEditor(await seqNow());
     transact(project, "AutoWed cut", () => [editor.createCloneTrackItemAction(it, tt(offset), 0, 0, true, false)]);
-  };
+  });
   let cloneWin = null;
   try {
     if (left >= right) {
@@ -524,8 +543,7 @@ function makeApplier(project, target, kind, cutTracks, trackOfCam, rangeT0, rang
     const acts = [];
     let processed = enabledUntil;
     for (let c = 0; c < trackOfCam.length; c++) {
-      const track = await target.getVideoTrack(trackOfCam[c]);
-      for (const { it, a, b } of await itemsOf(track)) {
+      for (const { it, a, b } of await itemsOf(async () => (await tgt()).getVideoTrack(trackOfCam[c]))) {
         if (b <= enabledUntil + 1e-3 || a < rangeT0 - 1e-3 || b > until + 1e-3) continue;
         const chosen = camAt((a + b) / 2);
         if (chosen === null) continue;
@@ -545,7 +563,7 @@ function makeApplier(project, target, kind, cutTracks, trackOfCam, rangeT0, rang
       for (let i = 1; i < segments.length; i++) cuts.push(segments[i].start);
       if (final) cuts.push(rangeT1);
       await cutAt(cuts);
-      await enablePieces(segments, until);
+      await retryStale(() => enablePieces(segments, until));
       // keep the timeline view on the newest cut, so the edit can be watched as it happens
       try {
         const seq = await tgt();
@@ -558,7 +576,8 @@ function makeApplier(project, target, kind, cutTracks, trackOfCam, rangeT0, rang
 }
 
 // ---------- live strip in the panel ----------
-const CAM_COLORS = ["#d4a24c", "#3fa7d6", "#e05d9e", "#5fb37a", "#a77de0", "#e07b39"];
+// same order as the clip labels AutoWed writes: Mango, Caribbean, Rose, Forest, Violet, Yellow, Cerulean, Magenta
+const CAM_COLORS = ["#e8962e", "#1fc4a8", "#f2709f", "#62b356", "#a990dd", "#e3d23f", "#2d9fd6", "#d63fae"];
 function renderStrip(segments, t0, t1, until) {
   const strip = $("strip");
   strip.innerHTML = "";
@@ -588,7 +607,14 @@ function renderLegend(names) {
 }
 
 // ---------- multicam: nest the In/Out part of the timeline in place ----------
-async function camerasInsideNest(nest) {
+async function camerasInsideNest(project, sd, nest) {
+  return retryStale(async () => {
+    // after a failed try the nest clip object may be dead: find it again on its track
+    const it = await locate(async () => (await freshSeq(project, sd.seq, sd.guid)).getVideoTrack(nest.track), [nest.start, nest.end]) || nest.it;
+    return camerasInsideNestItem({ ...nest, it });
+  });
+}
+async function camerasInsideNestItem(nest) {
   // cameras = video tracks of the nested sequence, mapped to the outer timeline's time
   const pi = ppro.ClipProjectItem.cast(await nest.it.getProjectItem());
   const nseq = await pi.getSequence();
@@ -635,7 +661,7 @@ async function nestInPlace(project, sd, range) {
   for (const t of range) await razorTracks(project, await outer(), camTracks, t, native);
   const victims = [];
   for (const ti of camTracks) {
-    for (const x of await itemsOf(await (await outer()).getVideoTrack(ti))) {
+    for (const x of await itemsOf(async () => (await outer()).getVideoTrack(ti))) {
       if (x.a >= range[0] - EPS && x.b <= range[1] + EPS) victims.push(x.it);
     }
   }
@@ -654,17 +680,18 @@ async function nestInPlace(project, sd, range) {
   const extraAudio = [];
   const o3 = await outer();
   const aNow = await o3.getAudioTrackCount();
-  for (let i = aCount; i < aNow; i++) for (const x of await itemsOf(await o3.getAudioTrack(i))) extraAudio.push(x.it);
+  for (let i = aCount; i < aNow; i++) for (const x of await itemsOf(async () => (await outer()).getAudioTrack(i))) extraAudio.push(x.it);
   if (extraAudio.length) {
     const sel = await selectionOf(extraAudio);
     const o4 = await outer();
     transact(project, "AutoWed nest", () => [ppro.SequenceEditor.getEditor(o4).createRemoveItemsAction(sel, false, ppro.Constants.MediaType.AUDIO)]);
   }
   sd.seq = await outer();
-  const placed = (await itemsOf(await sd.seq.getVideoTrack(vIdx))).find((x) => Math.abs(x.a - range[0]) < 0.05);
+  const placed = (await itemsOf(async () => (await outer()).getVideoTrack(vIdx))).find((x) => Math.abs(x.a - range[0]) < 0.05);
   if (!placed) throw new Error("nest clip timeline එකට දාන්න බැරි වුණා");
   log(`In/Out කොටස nest කළා: "${nName}" (V${vIdx + 1})`, "ok");
-  return { track: vIdx, it: placed.it, start: placed.a, end: placed.b, srcIn: (await placed.it.getInPoint()).seconds, name: nName, guid: nGuid };
+  const srcIn = await retryStale(async () => { const it = await locate(async () => (await outer()).getVideoTrack(vIdx), [placed.a, placed.b]); return (await it.getInPoint()).seconds; });
+  return { track: vIdx, it: placed.it, start: placed.a, end: placed.b, srcIn, name: nName, guid: nGuid };
 }
 
 // ---------- the main flow ----------
@@ -707,7 +734,7 @@ async function runAutoEdit() {
       if (sd.cams.length < 2) { log("කැමරා tracks 2ක් වත් හමු නොවුණි.", "bad"); return; }
       nest = await nestInPlace(project, sd, range);
     }
-    nestInfo = await camerasInsideNest(nest);
+    nestInfo = await camerasInsideNest(project, sd, nest);
     cams = nestInfo.cams;
     if (cams.length < 2) { log("Nest එක ඇතුළේ කැමරා tracks 2ක් වත් හමු නොවුණි.", "bad"); return; }
     applier = makeApplier(project, sd.seq, "multicam", [nest.track], [], Math.max(range[0], nest.start), Math.min(range[1], nest.end));
@@ -725,7 +752,7 @@ async function runAutoEdit() {
   };
   log(`Auto edit: ${evName} · ${kind === "multicam" ? "Multicamera" : "Manual cutting"} · ${fmt(range[0])} → ${fmt(range[1])}`);
   const job = (await call("POST", "/api/edit", body)).job;
-  let shown = 0, lastSegCount = -1;
+  let shown = 0, lastSegCount = -1, applyFails = 0;
   while (true) {
     await sleep(1000);
     let j;
@@ -736,11 +763,15 @@ async function runAutoEdit() {
       lastSegCount = j.segments.length;
       renderStrip(j.segments, range[0], range[1], j.committed_until || range[0]);
       if (applier) {
-        try { await applier.apply(j.segments, j.committed_until || range[0], false); }
+        try { await applier.apply(j.segments, j.committed_until || range[0], false); applyFails = 0; }
         catch (e) {
-          log("Timeline cut නැවැත්තුවා: " + (e && e.message || e), "bad");
-          log("Live cuts නැවැත්තුවා. Analysis එක ඉවර වෙනකම් යනවා (strip එකේ ප්‍රතිඵලය බලන්න).", "warn");
-          applier = null;
+          // one bad round does not end the live edit: the next round picks up from where it is
+          applyFails++;
+          log("Timeline cut: " + (e && e.message || e) + (applyFails < 4 ? " — ඊළඟ වටයේ ආයෙ උත්සාහ කරනවා" : ""), "warn");
+          if (applyFails >= 4) {
+            log("Live cuts නැවැත්තුවා. Analysis එක ඉවර වෙනකම් යනවා (strip එකේ ප්‍රතිඵලය බලන්න).", "warn");
+            applier = null;
+          }
         }
       }
     }
@@ -781,20 +812,44 @@ async function finish(project, kind, sd, nest, nestInfo, applier, cams, result) 
   const s = result.stats;
   if (applier) {
     try { await applier.apply(result.segments, result.range[1], true); }
-    catch (e) { log("Timeline cut: " + (e && e.message || e), "bad"); applier = null; }
+    catch (e) {
+      await sleep(400);
+      try { await applier.apply(result.segments, result.range[1], true); }
+      catch (e2) { log("Timeline cut: " + (e2 && e2.message || e2), "bad"); applier = null; }
+    }
   }
   reportSyncWarns();
   sd.seq = await freshSeq(project, sd.seq, sd.guid);
   await addDeadMarkers(project, sd.seq, result);
   if (kind === "stacked") {
     if (!applier) {
-      log("Timeline එකේ cut කරන්න බැරි වුණ නිසා ඔබේ timeline එකට තවත් වෙනස්කම් කළේ නැහැ (අලුත් sequence එකකුත් හැදුවේ නැහැ).", "warn");
+      log("Timeline එකේ cut කරන්න බැරි වුණ නිසා ඔබේ timeline එකට තවත් වෙනස්කම් කළේ නැහැ. Edit එක copy sequence එකේ තියෙනවා.", "warn");
       await importCopy(project, result);
       log("Razor test එක ඔබලා ඒකේ screenshot එකක් එවන්න.", "mute");
       showProgress("done", 1, null);
       return;
     }
-    await importCopy(project, result);
+    // camera colors: Premiere's API cannot set a timeline clip's label, so (like multicam angles) they
+    // are written into the saved project file: save, close for a few seconds, write, reopen
+    let proj = project;
+    try {
+      log("Camera colors දානවා: project එක save කරලා තත්පර කිහිපයකට close කරනවා…");
+      const path = project.path, seqName = sd.name;
+      await project.save();
+      const opts = ppro.CloseProjectOptions();
+      try { opts.setPromptIfDirty(false); opts.setShowCancelButton(false); } catch (e) {}
+      await project.close(opts);
+      let r;
+      try {
+        r = await call("POST", "/api/prproj/labels", { project_path: path, edit_seq: seqName,
+          cam_tracks: cams.map((c) => c.track), start: result.range[0], end: result.range[1] }, 120000);
+      } catch (e) { r = { error: String(e) }; }
+      proj = await ppro.Project.open(path);
+      try { const e = (await proj.getSequences()).find((x) => x.name === seqName); if (e) await proj.openSequence(e); } catch (e) {}
+      if (r.error) log("Camera colors දාන්න බැරි වුණා: " + r.error + " (edit එකට බලපෑමක් නැහැ)", "warn");
+      else log(`Camera colors දැම්මා: clips ${r.report.labeled} · Backup: ${r.backup}`, "ok");
+    } catch (e) { log("Camera colors: " + (e && e.message || e), "warn"); }
+    await importCopy(proj, result);
     showProgress("done", 1, null);
     log(`✔ ඉවරයි · cuts ${s.cuts} · සාමාන්‍ය shot ${s.avg_shot}s · angle මාරු කරන්න කෑල්ල select කරලා Shift+E.`, "ok");
     return;
@@ -894,3 +949,109 @@ $("go").addEventListener("click", () => autoEdit());
 $("ver").textContent = "AutoWed v" + PANEL_VERSION;
 ping().then((ok) => { if (ok) checkUpdate(false); });
 setInterval(ping, 15000);
+
+
+// ---------- Claude debug bridge (MCP) ----------
+// When "Claude: ON", the panel asks the engine for commands that Claude sent through the AutoWed MCP
+// server (read the timeline, the log, run a test) and sends the answers back. Off by default.
+let bridgeOn = false;
+try { bridgeOn = localStorage.getItem("autowed.bridge") === "1"; } catch (e) {}
+function showBridge() { const b = $("dbg"); b.textContent = bridgeOn ? "Claude: ON" : "Claude: OFF"; b.className = bridgeOn ? "on" : ""; }
+
+function safeJson(v, depth = 0) {
+  if (v === null || v === undefined) return v === undefined ? null : v;
+  if (typeof v === "number" || typeof v === "string" || typeof v === "boolean") return v;
+  if (depth > 5) return String(v);
+  if (Array.isArray(v)) return v.slice(0, 2000).map((x) => safeJson(x, depth + 1));
+  if (typeof v === "object") {
+    if (typeof v.seconds === "number" && Object.keys(v).length <= 3) return v.seconds;
+    const o = {};
+    for (const k of Object.keys(v).slice(0, 200)) { try { o[k] = safeJson(v[k], depth + 1); } catch (e) { o[k] = String(e); } }
+    return o;
+  }
+  return String(v);
+}
+
+async function dumpSequence(args) {
+  const project = await ppro.Project.getActiveProject();
+  const seq = project && (await project.getActiveSequence());
+  if (!seq) return { error: "no active sequence" };
+  let fps = 25;
+  try { const tb = parseFloat(await seq.getTimebase()); if (tb > 0) fps = TICKS / tb; } catch (e) {}
+  const inT = (await seq.getInPoint()).seconds, outT = (await seq.getOutPoint()).seconds;
+  const lo = args.range ? inT : -1, hi = args.range ? outT : 1e12;
+  const maxClips = args.max_clips || 400;
+  const dumpTrack = async (track, kind, i) => {
+    const clips = [];
+    for (const it of track.getTrackItems(ppro.Constants.TrackItemType.CLIP, false)) {
+      const a = (await it.getStartTime()).seconds, b = (await it.getEndTime()).seconds;
+      if (b < lo || a > hi) continue;
+      if (clips.length >= maxClips) { clips.push({ truncated: true }); break; }
+      const c = { start: +a.toFixed(3), end: +b.toFixed(3), in: +(await it.getInPoint()).seconds.toFixed(3),
+                  out: +(await it.getOutPoint()).seconds.toFixed(3) };
+      try { c.name = await it.getName(); } catch (e) {}
+      try { c.disabled = await it.isDisabled(); } catch (e) {}
+      if (kind === "video") {
+        try { c.speed = await it.getSpeed(); } catch (e) {}
+        try { const r = await readItem(it); c.path = r.path; if (r.why) c.why = r.why; } catch (e) { c.read_error = String(e); }
+      }
+      clips.push(c);
+    }
+    let name = ""; try { name = track.name; } catch (e) {}
+    return { index: i, name, clips };
+  };
+  const video = [], audio = [];
+  const vc = await seq.getVideoTrackCount();
+  for (let i = 0; i < vc; i++) video.push(await dumpTrack(await seq.getVideoTrack(i), "video", i));
+  if (args.audio) {
+    const ac = await seq.getAudioTrackCount();
+    for (let i = 0; i < ac; i++) audio.push(await dumpTrack(await seq.getAudioTrack(i), "audio", i));
+  }
+  return { project: project.name, path: project.path, sequence: seq.name, guid: seq.guid.toString(), fps,
+           in: inT, out: outT, end: (await seq.getEndTime()).seconds, video, audio };
+}
+
+async function bridgeRun(cmd, args) {
+  args = args || {};
+  if (cmd === "status") return { panel: PANEL_VERSION, busy, progress: ($("pct") || {}).textContent, stage: ($("stage") || {}).textContent };
+  if (cmd === "log") return { lines: LOGBUF.slice(-(args.lines || 120)) };
+  if (cmd === "sequence") return dumpSequence(args);
+  if (cmd === "read_sequence") { const sd = await readSequence(); return sd ? { name: sd.name, inT: sd.inT, outT: sd.outT, hasInOut: sd.hasInOut, cams: sd.cams.map((c) => ({ name: c.name, track: c.track, clips: c.clips.length })), nest: sd.nestInRange ? sd.nestInRange.name : null } : { error: "no sequence" }; }
+  if (cmd === "razor_test") { const n = LOGBUF.length; await razorTest(); return { lines: LOGBUF.slice(n) }; }
+  if (cmd === "auto_edit") {
+    if (busy) return { error: "AutoWed is already running" };
+    if (args.event) $("event").value = args.event;
+    if (args.edit_type) $("etype").value = args.edit_type;
+    autoEdit();
+    return { started: true, event: $("event").value, edit_type: $("etype").value };
+  }
+  if (cmd === "eval") {
+    const AsyncFn = Object.getPrototypeOf(async function () {}).constructor;
+    const fn = new AsyncFn("ppro", "project", "h", args.code || "");
+    const project = await ppro.Project.getActiveProject();
+    const h = { itemsOf, readTI, readItem, freshSeq, locate, log, fmt, sleep };
+    return { result: safeJson(await fn(ppro, project, h)) };
+  }
+  return { error: "unknown command " + cmd };
+}
+
+async function bridgeLoop() {
+  while (true) {
+    if (!bridgeOn) { await sleep(1000); continue; }
+    let job = null;
+    try { job = await call("GET", "/api/bridge/next?panel=" + encodeURIComponent(PANEL_VERSION), null, 5000); } catch (e) { await sleep(2000); continue; }
+    if (!job || !job.id) { await sleep(600); continue; }
+    let res;
+    try { res = { ok: true, result: safeJson(await bridgeRun(job.cmd, job.args)) }; }
+    catch (e) { res = { ok: false, error: String((e && e.stack) || e) }; }
+    try { await call("POST", "/api/bridge/result", { id: job.id, ...res }, 8000); } catch (e) {}
+  }
+}
+$("dbg").onclick = () => {
+  bridgeOn = !bridgeOn;
+  try { localStorage.setItem("autowed.bridge", bridgeOn ? "1" : "0"); } catch (e) {}
+  showBridge();
+  log(bridgeOn ? "Claude debug bridge ON: Claude ට MCP එකෙන් timeline එක කියවන්න, test run කරන්න පුළුවන්." : "Claude debug bridge OFF.", "mute");
+};
+showBridge();
+bridgeLoop();

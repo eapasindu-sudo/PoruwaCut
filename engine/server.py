@@ -125,10 +125,70 @@ def _run_edit(job, body):
         print(traceback.format_exc(), flush=True)
 
 
+# ---------- Claude debug bridge: MCP server -> engine -> Premiere panel -> back ----------
+import collections as _collections
+import uuid as _uuid
+
+BRIDGE = {"queue": _collections.deque(), "results": {}, "cond": threading.Condition(),
+          "last_poll": 0.0, "panel": ""}
+
+
+def _bridge_call(cmd: str, args: dict, timeout: float) -> dict:
+    import time
+    if time.time() - BRIDGE["last_poll"] > 6:
+        return {"ok": False, "error": "AutoWed panel is not connected. Open Premiere Pro, open the AutoWed "
+                                      "panel and switch the footer button to 'Claude: ON'."}
+    jid = _uuid.uuid4().hex[:12]
+    with BRIDGE["cond"]:
+        BRIDGE["queue"].append({"id": jid, "cmd": cmd, "args": args or {}})
+        end = time.time() + timeout
+        while jid not in BRIDGE["results"]:
+            left = end - time.time()
+            if left <= 0:
+                BRIDGE["queue"] = _collections.deque(j for j in BRIDGE["queue"] if j["id"] != jid)
+                return {"ok": False, "error": f"panel did not answer within {timeout:.0f}s (it may still be working)"}
+            BRIDGE["cond"].wait(min(left, 1.0))
+        return BRIDGE["results"].pop(jid)
+
+
+def _bridge_api(method, path, body):
+    import time
+    if method == "GET" and path == "/api/bridge/next":
+        BRIDGE["last_poll"] = time.time()
+        with BRIDGE["cond"]:
+            return 200, (BRIDGE["queue"].popleft() if BRIDGE["queue"] else {})
+    if method == "GET" and path == "/api/bridge/status":
+        age = time.time() - BRIDGE["last_poll"] if BRIDGE["last_poll"] else None
+        return 200, {"engine": __version__, "panel_connected": age is not None and age < 6,
+                     "last_poll_age": age, "panel": BRIDGE["panel"]}
+    if method == "GET" and path == "/api/log/tail":
+        try:
+            with open(LOG_FILE, encoding="utf-8", errors="replace") as f:
+                return 200, {"lines": f.read().splitlines()[-300:]}
+        except OSError as e:
+            return 200, {"lines": [], "error": str(e)}
+    if method == "POST" and path == "/api/bridge/result":
+        with BRIDGE["cond"]:
+            BRIDGE["results"][body.get("id", "")] = {k: v for k, v in body.items() if k != "id"}
+            BRIDGE["cond"].notify_all()
+        return 200, {"ok": True}
+    if method == "POST" and path == "/api/bridge/call":
+        return 200, _bridge_call(body.get("cmd", ""), body.get("args") or {}, float(body.get("timeout", 60)))
+    return None
+
+
 def api(method: str, path: str, body: dict | None = None):
     """One router for both the HTTP server and the file-based IPC used by the Premiere panel.
     Returns (status_code, json_obj)."""
     body = body or {}
+    bpath, _, q = path.partition("?")
+    if bpath.startswith("/api/bridge/") or bpath == "/api/log/tail":
+        if bpath == "/api/bridge/next" and q.startswith("panel="):
+            from urllib.parse import unquote
+            BRIDGE["panel"] = unquote(q[6:])
+        r = _bridge_api(method, bpath, body)
+        if r is not None:
+            return r
     if method == "GET":
         if path == "/api/presets":
             return 200, {"events": presets.listing()}
@@ -175,6 +235,22 @@ def api(method: str, path: str, body: dict | None = None):
                 shutil.copy2(backup, src)   # nothing matched: leave the project exactly as it was
                 return 200, {"error": "nest pieces not found in the saved project", "report": rep}
             return 200, {"path": dst, "report": rep, "backup": backup}
+        if path == "/api/prproj/labels":
+            import shutil
+            import time as _t
+            from . import prproj
+            src = body["project_path"]
+            base, _ = os.path.splitext(src)
+            backup = f"{base}.autowed-backup-{_t.strftime('%Y%m%d-%H%M%S')}.prproj"
+            shutil.copy2(src, backup)
+            try:
+                rep = prproj.label_camera_tracks(src, src, body["edit_seq"], body["cam_tracks"],
+                                                 float(body["start"]), float(body["end"]))
+            except Exception as e:  # noqa: BLE001
+                shutil.copy2(backup, src)
+                os.remove(backup)
+                return 200, {"error": str(e)}
+            return 200, {"report": rep, "backup": backup}
         if path == "/api/quit":
             threading.Timer(0.5, lambda: os._exit(0)).start()
             return 200, {"ok": True}

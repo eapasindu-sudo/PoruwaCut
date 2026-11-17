@@ -32,7 +32,9 @@
   #log { background:#161616; border:1px solid #333; border-radius:4px; padding:6px; height:130px; overflow-y:scroll; font-size:11px; white-space:pre-wrap; }
   #foot { display:flex; align-items:center; justify-content:flex-end; margin-top:6px; padding-top:6px; border-top:1px solid #2e2e2e; }
   #foot .mute { margin-right:8px; font-size:11px; }
-  #chk { padding:4px 10px; font-size:11px; }
+  #chk, #dbg { padding:4px 10px; font-size:11px; }
+  #dbg { margin-right:6px; }
+  #dbg.on { color:#d4a24c; }
 </style>
 </head>
 <body>
@@ -74,7 +76,7 @@
 
   <div id="log" style="margin-top:8px"></div>
 
-  <div id="foot"><span class="mute" style="flex:1">Powered by <b style="color:#d4a24c">Endora</b></span><span class="mute" id="ver"></span><button id="chk">Check update</button></div>
+  <div id="foot"><span class="mute" style="flex:1">Powered by <b style="color:#d4a24c">Endora</b></span><span class="mute" id="ver"></span><button id="dbg" title="Claude MCP debug bridge">Claude: OFF</button><button id="chk">Check update</button></div>
   <script src="main.js"></script>
 </body>
 </html>

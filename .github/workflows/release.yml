@@ -72,6 +72,20 @@ jobs:
           --collect-submodules engine
           poruwacut_engine.py
 
+      - name: Build MCP exe (PyInstaller, console, standard library only)
+        run: >
+          pyinstaller --noconfirm --onefile --console
+          --name AutoWedMCP --icon build/icon.ico
+          autowed_mcp.py
+
+      - name: Smoke test the MCP exe
+        shell: pwsh
+        run: |
+          $in = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' + "`n" + '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' + "`n"
+          $out = $in | dist/AutoWedMCP.exe
+          $out
+          if (-not ($out -match "premiere_get_sequence")) { throw "MCP exe did not list its tools" }
+
       - name: Smoke test the exe
         shell: pwsh
         run: |
