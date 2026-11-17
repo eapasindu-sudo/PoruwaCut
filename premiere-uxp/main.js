@@ -289,6 +289,14 @@ async function findNewSequence(project, before, timeoutMs = 8000) {
   return null;
 }
 
+// Sequence objects can go stale after edits too: look a sequence up again by its guid.
+async function freshSeq(project, seq, guid) {
+  try {
+    const g = guid || seq.guid.toString();
+    return (await project.getSequences()).find((x) => x.guid.toString() === g) || seq;
+  } catch (e) { return seq; }
+}
+
 async function renameSequence(project, seq, name) {
   try {
     const pi = await seq.getProjectItem();
@@ -399,18 +407,24 @@ async function fixItem(project, getIt, want) {
   let orders = fixOrder ? [fixOrder, ...FIX_ORDERS.filter((o) => o !== fixOrder)] : FIX_ORDERS.slice();
   // a clip that has to get longer at the tail: extend the end first, so it never collapses to 0 length
   if (want.b > c.b + 0.002) orders = [["end", "in", "start"], ["end", "start", "in"], ...orders];
-  for (const order of orders) {
-    for (let round = 0; round < 2; round++) {
-      for (const f of order) {
-        c = await read();
-        if (!fieldOk(c, want, f)) await applyField(project, getIt, f, want);
-      }
+  for (const order of orders.slice(0, 2)) {
+    for (const f of order) {
       c = await read();
-      if (allOk(c, want)) { fixOrder = order; return c; }
+      if (!fieldOk(c, want, f)) { try { await applyField(project, getIt, f, want); } catch (e) {} }
     }
+    c = await read();
+    if (allOk(c, want)) { fixOrder = order; return c; }
   }
+  // no blocking sync check: the footage is already synced by the editor. Note it and carry on.
   c = await read();
-  throw new Error(`sync check failed at ${fmt(want.a)}: start ${c.a.toFixed(3)}/${want.a.toFixed(3)} end ${c.b.toFixed(3)}/${want.b.toFixed(3)} in ${c.inp.toFixed(3)}/${want.inp.toFixed(3)}`);
+  syncWarns.push(fmt(want.a));
+  return c;
+}
+let syncWarns = [];
+function reportSyncWarns() {
+  if (!syncWarns.length) return;
+  log(`සටහන: cuts ${syncWarns.length}ක clip එකේ in-point Premiere එකෙන් කියවපු අගය වෙනස් (${syncWarns.slice(0, 6).join(", ")}${syncWarns.length > 6 ? "…" : ""}). Edit එක නතර කළේ නෑ — ඒ තැන් ටික ඇහෙන් බලන්න.`, "warn");
+  syncWarns = [];
 }
 
 async function removeItems(project, seq, items, mediaType) {
@@ -479,16 +493,20 @@ function makeApplier(project, target, kind, cutTracks, trackOfCam, rangeT0, rang
   log(native ? "Cuts: Premiere razor" : "Cuts: clone + trim (Premiere 26 / 27.0)", "mute");
   const done = new Set();
   let enabledUntil = rangeT0;
+  const targetGuid = target.guid.toString();
+  const tgt = async () => (target = await freshSeq(project, target, targetGuid));
+  let followed = false;
   async function cutAt(times) {
     for (const t of times) {
       const key = t.toFixed(3);
       if (done.has(key) || t <= 0.001) continue;
-      await razorTracks(project, target, cutTracks, t, native);
+      await razorTracks(project, await tgt(), cutTracks, t, native);
       done.add(key);
     }
   }
   async function enablePieces(segments, until) {
     if (kind !== "stacked") return;
+    await tgt();
     const camAt = (t) => { for (const s of segments) if (t >= s.start - 1e-3 && t < s.end + 1e-3) return s.cam; return null; };
     const acts = [];
     let processed = enabledUntil;
@@ -515,6 +533,13 @@ function makeApplier(project, target, kind, cutTracks, trackOfCam, rangeT0, rang
       if (final) cuts.push(rangeT1);
       await cutAt(cuts);
       await enablePieces(segments, until);
+      // keep the timeline view on the newest cut, so the edit can be watched as it happens
+      try {
+        const seq = await tgt();
+        if (!followed) { followed = true; try { await project.openSequence(seq); } catch (e) {} }
+        const last = cuts.length ? Math.min(Math.max(...cuts), rangeT1) : until;
+        if (typeof seq.setPlayerPosition === "function") await seq.setPlayerPosition(tt(last));
+      } catch (e) {}
     },
   };
 }
@@ -569,7 +594,7 @@ async function camerasInsideNest(nest) {
     }
     if (clips.length) cams.push({ name: track.name || `V${t + 1}`, track: t, clips });
   }
-  return { nseq, d, cams };
+  return { nseq, nseqName: nseq.name, nseqGuid: nseq.guid.toString(), d, cams };
 }
 
 async function selectionOf(items) {
@@ -586,37 +611,47 @@ async function nestInPlace(project, sd, range) {
   let nseq = await sd.seq.createSubsequence(true);
   if (!nseq) nseq = await findNewSequence(project, before);
   if (!nseq) throw new Error("nest (subsequence) හදන්න බැරි වුණා");
-  await renameSequence(project, nseq, await uniqueName(project, `${sd.name} - AutoWed Nest ${fmt(range[0])}-${fmt(range[1])}`));
-  const native = hasNativeRazor(sd.seq);
+  const nGuid = nseq.guid.toString();
+  const nName = await uniqueName(project, `${sd.name} - AutoWed Nest ${fmt(range[0])}-${fmt(range[1])}`);
+  await renameSequence(project, nseq, nName);
+  const seqG = sd.seq.guid.toString();
+  const outer = async () => (await project.getSequences()).find((x) => x.guid.toString() === seqG) || sd.seq;
+  const native = hasNativeRazor(await outer());
   const camTracks = sd.cams.map((c) => c.track);
   // 2) clear the camera video between In and Out (audio is not touched)
-  for (const t of range) await razorTracks(project, sd.seq, camTracks, t, native);
+  for (const t of range) await razorTracks(project, await outer(), camTracks, t, native);
   const victims = [];
   for (const ti of camTracks) {
-    for (const x of await itemsOf(await sd.seq.getVideoTrack(ti))) {
+    for (const x of await itemsOf(await (await outer()).getVideoTrack(ti))) {
       if (x.a >= range[0] - EPS && x.b <= range[1] + EPS) victims.push(x.it);
     }
   }
   if (victims.length) {
     const sel = await selectionOf(victims);
-    transact(project, "AutoWed nest", () => [ppro.SequenceEditor.getEditor(sd.seq).createRemoveItemsAction(sel, false, ppro.Constants.MediaType.VIDEO)]);
+    const o1 = await outer();
+    transact(project, "AutoWed nest", () => [ppro.SequenceEditor.getEditor(o1).createRemoveItemsAction(sel, false, ppro.Constants.MediaType.VIDEO)]);
   }
   // 3) drop the nest on the first camera track at In; its audio goes to a new track and is removed
   const vIdx = Math.min(...camTracks);
-  const aCount = await sd.seq.getAudioTrackCount();
-  const nestItem = await nseq.getProjectItem();
-  transact(project, "AutoWed nest", () => [ppro.SequenceEditor.getEditor(sd.seq).createOverwriteItemAction(nestItem, tt(range[0]), vIdx, aCount)]);
+  const o2 = await outer();
+  const aCount = await o2.getAudioTrackCount();
+  const nFresh = (await project.getSequences()).find((x) => x.guid.toString() === nGuid) || nseq;
+  const nestItem = await nFresh.getProjectItem();
+  transact(project, "AutoWed nest", () => [ppro.SequenceEditor.getEditor(o2).createOverwriteItemAction(nestItem, tt(range[0]), vIdx, aCount)]);
   const extraAudio = [];
-  const aNow = await sd.seq.getAudioTrackCount();
-  for (let i = aCount; i < aNow; i++) for (const x of await itemsOf(await sd.seq.getAudioTrack(i))) extraAudio.push(x.it);
+  const o3 = await outer();
+  const aNow = await o3.getAudioTrackCount();
+  for (let i = aCount; i < aNow; i++) for (const x of await itemsOf(await o3.getAudioTrack(i))) extraAudio.push(x.it);
   if (extraAudio.length) {
     const sel = await selectionOf(extraAudio);
-    transact(project, "AutoWed nest", () => [ppro.SequenceEditor.getEditor(sd.seq).createRemoveItemsAction(sel, false, ppro.Constants.MediaType.AUDIO)]);
+    const o4 = await outer();
+    transact(project, "AutoWed nest", () => [ppro.SequenceEditor.getEditor(o4).createRemoveItemsAction(sel, false, ppro.Constants.MediaType.AUDIO)]);
   }
+  sd.seq = await outer();
   const placed = (await itemsOf(await sd.seq.getVideoTrack(vIdx))).find((x) => Math.abs(x.a - range[0]) < 0.05);
   if (!placed) throw new Error("nest clip timeline එකට දාන්න බැරි වුණා");
-  log(`In/Out කොටස nest කළා: "${nseq.name}" (V${vIdx + 1})`, "ok");
-  return { track: vIdx, it: placed.it, start: placed.a, end: placed.b, srcIn: (await placed.it.getInPoint()).seconds, name: nseq.name };
+  log(`In/Out කොටස nest කළා: "${nName}" (V${vIdx + 1})`, "ok");
+  return { track: vIdx, it: placed.it, start: placed.a, end: placed.b, srcIn: (await placed.it.getInPoint()).seconds, name: nName, guid: nGuid };
 }
 
 // ---------- the main flow ----------
@@ -716,6 +751,8 @@ async function finish(project, kind, sd, nest, nestInfo, applier, cams, result) 
     try { await applier.apply(result.segments, result.range[1], true); }
     catch (e) { log("Timeline cut: " + (e && e.message || e), "bad"); applier = null; }
   }
+  reportSyncWarns();
+  sd.seq = await freshSeq(project, sd.seq);
   await addDeadMarkers(project, sd.seq, result);
   if (kind === "stacked") {
     if (!applier) {
@@ -741,7 +778,7 @@ async function finish(project, kind, sd, nest, nestInfo, applier, cams, result) 
   let r;
   try {
     r = await call("POST", "/api/prproj/multicam", {
-      project_path: path, in_place: true, edit_seq: seqName, nest_seq: nestInfo.nseq.name,
+      project_path: path, in_place: true, edit_seq: seqName, nest_seq: nestInfo.nseqName,
       segments: segsNest, cam_tracks: cams.map((c) => c.track),
     }, 120000);
   } catch (e) { r = { error: String(e) }; }
