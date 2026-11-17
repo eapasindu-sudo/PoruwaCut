@@ -140,16 +140,23 @@ def score_cameras(analysis: dict, cfg: ModeConfig, beat_period: float | None = N
         face = gaussian_filter1d(face, sig)  # detector flicker
         pair = _nan_fill(c["pair_central"]) if "pair_central" in c else np.zeros(N)
         couple = gaussian_filter1d(pair, sig)   # couple framed in the centre of the shot
+        cid = _nan_fill(c["couple"]) if "couple" in c and np.isfinite(c["couple"]).any() else np.zeros(N)
+        cid = gaussian_filter1d(np.clip(cid, 0, 2) / 2, sig)       # bride / groom recognised
+        smile = _nan_fill(c["smile"]) if "smile" in c and np.isfinite(c["smile"]).any() else np.zeros(N)
+        smile = gaussian_filter1d(smile, sig)
 
         bias = cfg.cam_bias[i] if i < len(cfg.cam_bias) else 0.0
         total = (cfg.w_sharp * sharp_s - cfg.w_exposure * exposure - cfg.w_shake * shake
                  - cfg.w_pan * pan_pen - cfg.w_obstruct * obstruct + cfg.w_face * face
-                 + getattr(cfg, "w_couple", 0.0) * couple + bias)
+                 + getattr(cfg, "w_couple", 0.0) * couple + getattr(cfg, "w_couple_id", 0.0) * cid
+                 + getattr(cfg, "w_smile", 0.0) * smile + bias)
         total = uniform_filter1d(total, max(1, int(cfg.smooth_sec * fps)))
         over = total > cfg.good_level
         total[over] = cfg.good_level + cfg.good_slope * (total[over] - cfg.good_level)
         total[~valid] = -1e3
         scores[i] = total
         parts.append({"sharp": sharp_s, "exposure": exposure, "shake": shake, "pan": pan_pen,
-                      "obstruct": obstruct, "face": face, "couple": couple, "rhythm": rhythm})
+                      "obstruct": obstruct, "face": face, "couple": couple, "rhythm": rhythm,
+                      "smile": smile, "couple_id": cid,
+                      "hug": _nan_fill(c["hug"]) if "hug" in c and np.isfinite(c["hug"]).any() else np.zeros(N)})
     return scores, parts

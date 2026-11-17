@@ -46,6 +46,7 @@ Source: "ffmpeg\ffprobe.exe"; DestDir: "{app}\engine\ffmpeg"; Flags: ignoreversi
 Source: "ffmpeg\LICENSE.txt"; DestDir: "{app}\engine\ffmpeg"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\dist\PoruwaCut.ccx"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\dist\AutoWedMCP.exe"; DestDir: "{app}\mcp"; Flags: ignoreversion
+Source: "..\dist\AutoWed.mcpb"; DestDir: "{app}\mcp"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
@@ -53,6 +54,7 @@ Name: "{userprograms}\AutoWed\AutoWed Engine"; Filename: "{app}\engine\PoruwaCut
 Name: "{userprograms}\AutoWed\AutoWed in browser"; Filename: "http://127.0.0.1:7788"
 Name: "{userprograms}\AutoWed\Reinstall Premiere plugin (ccx)"; Filename: "{app}\PoruwaCut.ccx"
 Name: "{userprograms}\AutoWed\Read me"; Filename: "{app}\README.md"
+Name: "{userprograms}\AutoWed\Install AutoWed for Claude (extension)"; Filename: "{app}\mcp\AutoWed.mcpb"
 Name: "{userstartup}\AutoWed Engine"; Filename: "{app}\engine\PoruwaCutEngine.exe"
 
 [Run]

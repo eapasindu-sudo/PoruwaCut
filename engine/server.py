@@ -83,6 +83,63 @@ def _default_out(project, mode):
     return os.path.join(os.path.dirname(first), "PoruwaCut_out", mode)
 
 
+def _json_file(name):
+    return os.path.join(DATA_DIR, name)
+
+
+def _load_json(name, default):
+    try:
+        with open(_json_file(name), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+
+def _save_json(name, data):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    tmp = _json_file(name) + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, _json_file(name))
+
+
+def _learned():
+    return _load_json("learned.json", {})
+
+
+def _record_stats(res, body):
+    """Usage stats: what AutoWed edited and roughly how much editing time that saved."""
+    try:
+        import time as _t
+        st = _load_json("stats.json", {"runs": []})
+        a, b = res.get("range", [0, 0])
+        st["runs"].append({"t": int(_t.time()), "event": res.get("event"), "kind": (body.get("options") or {}).get("kind"),
+                           "seconds": round(b - a, 1), "cuts": res["stats"]["cuts"],
+                           "cams": len(res["stats"].get("camera_share_pct", {})), "took": res["stats"].get("seconds")})
+        st["runs"] = st["runs"][-5000:]
+        _save_json("stats.json", st)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _stats_summary():
+    import time as _t
+    runs = _load_json("stats.json", {"runs": []})["runs"]
+    def summ(rs):
+        foot = sum(r["seconds"] for r in rs)
+        took = sum(r.get("took") or 0 for r in rs)
+        # a manual multicam pass is roughly 1.5x the footage length (watch + choose + cut)
+        saved = max(0.0, 1.5 * foot - took)
+        return {"runs": len(rs), "footage_min": round(foot / 60, 1), "cuts": sum(r["cuts"] for r in rs),
+                "processing_min": round(took / 60, 1), "saved_hours": round(saved / 3600, 1)}
+    now = _t.time()
+    by_event = {}
+    for r in runs:
+        by_event[r["event"]] = by_event.get(r["event"], 0) + 1
+    return {"all": summ(runs), "last_30_days": summ([r for r in runs if now - r["t"] < 30 * 86400]),
+            "by_event": by_event}
+
+
 def _run_sync(job, body):
     """Sync tab: line up any set of camera / recorder / mic files by audio."""
     import time
@@ -160,13 +217,22 @@ def _run_edit(job, body):
             os.makedirs(out_dir, exist_ok=True)
             proj.save(p, os.path.join(out_dir, "project.json"))
             ov = {k: o.get(k) for k in ("min_shot", "max_shot", "switch_cost", "stay_cost")}
+            # learned from the editor's own changes (Learn button): shot length scale for this event
+            lr = _learned().get(body.get("event") or "auto")
+            if lr and not o.get("min_shot") and not o.get("max_shot"):
+                from . import presets as _pr
+                base = _pr.get(body.get("event") or "auto", None)
+                sc = float(lr.get("shot_scale", 1.0))
+                ov["min_shot"], ov["max_shot"] = round(base.min_shot * sc, 2), round(base.max_shot * sc, 2)
+                log(f"ඔබේ edit style එකෙන් ඉගෙනගත්ත shot දිග: x{sc:.2f}")
             if o.get("cam_bias"):
                 ov["cam_bias"] = [float(x) for x in o["cam_bias"]]
             res = run(p, mode, out_dir, ov, (float(o["fps"]) if o.get("fps") else None), not o.get("cpu", False),
                       int(o.get("workers", 2)), o.get("layout", "stacked"), bool(o.get("remove_dead", False)),
                       log=log, progress=_progress(job), on_segments=_on_segments(job),
-                      xml_name=(o.get("xml_name") or None))
+                      xml_name=(o.get("xml_name") or None), extras=o.get("extras") or {})
             res.pop("beats", None)
+            _record_stats(res, body)
             job["result"] = res
             job["progress"] = 1.0
             job["status"] = "done"
@@ -256,6 +322,23 @@ def api(method: str, path: str, body: dict | None = None):
             if not job:
                 return 404, {"error": "no such job"}
             return 200, {**job, "log": list(job["log"])}
+        if path == "/api/stats":
+            return 200, _stats_summary()
+        if path == "/api/studio_presets":
+            folder = os.path.join(os.path.expanduser("~"), "Documents", "AutoWed Presets")
+            out = []
+            if os.path.isdir(folder):
+                for fn in sorted(os.listdir(folder)):
+                    if fn.lower().endswith(".json"):
+                        try:
+                            with open(os.path.join(folder, fn), encoding="utf-8") as f:
+                                d = json.load(f)
+                            out.append({"name": d.get("name") or fn[:-5], "settings": d.get("settings") or {}})
+                        except (OSError, ValueError):
+                            pass
+            return 200, {"folder": folder, "presets": out}
+        if path == "/api/learned":
+            return 200, _learned()
     elif method == "POST":
         if path == "/api/update/install":
             if LOCK.locked():
@@ -306,6 +389,30 @@ def api(method: str, path: str, body: dict | None = None):
         if path == "/api/quit":
             threading.Timer(0.5, lambda: os._exit(0)).start()
             return 200, {"ok": True}
+        if path == "/api/learn":
+            # {"event", "user_avg_shot", "auto_avg_shot"}: move the shot length toward the editor's taste
+            ev = body.get("event") or "auto"
+            u, a = float(body.get("user_avg_shot") or 0), float(body.get("auto_avg_shot") or 0)
+            if u <= 0 or a <= 0:
+                return 400, {"error": "need both averages"}
+            lr = _learned()
+            old = float(lr.get(ev, {}).get("shot_scale", 1.0))
+            new = max(0.5, min(2.0, 0.6 * old + 0.4 * old * (u / a)))
+            lr[ev] = {"shot_scale": round(new, 3), "samples": int(lr.get(ev, {}).get("samples", 0)) + 1}
+            _save_json("learned.json", lr)
+            return 200, {"event": ev, "shot_scale": lr[ev]["shot_scale"], "samples": lr[ev]["samples"]}
+        if path == "/api/learn/reset":
+            _save_json("learned.json", {})
+            return 200, {"ok": True}
+        if path == "/api/studio_presets":
+            # save one named preset {"name", "settings"} ; shared as a file in Documents\AutoWed Presets
+            name = re.sub(r'[\\/:*?"<>|]+', "_", str(body.get("name") or "preset")).strip()[:60]
+            folder = os.path.join(os.path.expanduser("~"), "Documents", "AutoWed Presets")
+            os.makedirs(folder, exist_ok=True)
+            p_ = os.path.join(folder, name + ".json")
+            with open(p_, "w", encoding="utf-8") as f:
+                json.dump({"name": name, "settings": body.get("settings") or {}}, f, ensure_ascii=False, indent=1)
+            return 200, {"path": p_}
         if path == "/api/events":
             job = _new_job("events")
             threading.Thread(target=_run_events, args=(job, body), daemon=True).start()

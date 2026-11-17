@@ -117,6 +117,9 @@ jobs:
       - name: Package Premiere plugin (.ccx)
         run: python build/make_ccx.py
 
+      - name: Package Claude extension (.mcpb)
+        run: python build/make_mcpb.py
+
       - name: Build installer (Inno Setup)
         shell: pwsh
         run: |
@@ -139,6 +142,7 @@ jobs:
           path: |
             Output/*_Setup_*.exe
             dist/*_*.ccx
+            dist/AutoWed_*.mcpb
 
       - name: Publish GitHub Release
         if: steps.exists.outputs.exists == 'false'
@@ -151,4 +155,5 @@ jobs:
             Output/AutoWed_Setup_*.exe
             Output/PoruwaCut_Setup_*.exe
             dist/AutoWed_*.ccx
+            dist/AutoWed_*.mcpb
           generate_release_notes: true

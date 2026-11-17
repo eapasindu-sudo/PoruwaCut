@@ -599,7 +599,7 @@ function renderStrip(segments, t0, t1, until) {
     const d = document.createElement("div");
     d.style.width = (Math.max(0, s.end - s.start) / total * 100).toFixed(3) + "%";
     d.style.height = "16px";
-    d.style.backgroundColor = CAM_COLORS[s.cam % CAM_COLORS.length];
+    d.style.backgroundColor = s.cam < 0 ? "#333" : CAM_COLORS[s.cam % CAM_COLORS.length];
     d.style.borderRight = "1px solid #1b1b1b";
     strip.appendChild(d);
   }
@@ -766,7 +766,8 @@ async function runAutoEdit(jobOpts) {
     project: { name: sd.name, fps: sd.fps, master_cam: 0, range,
                cameras: cams.map((c) => ({ name: c.name, clips: c.clips })), audio_tracks: sd.audio },
     event,
-    options: { min_shot: numOrNull("min_shot"), max_shot: numOrNull("max_shot"), layout: "stacked",
+    options: { min_shot: numOrNull("min_shot"), max_shot: numOrNull("max_shot"), layout: "stacked", kind,
+               extras: gatherExtras(),
                xml_name: await uniqueName(project, `${sd.name} - AutoWed ${evName} ${stamp()}`) },
   };
   log(`Auto edit: ${evName} · ${kind === "multicam" ? "Multicamera" : "Manual cutting"} · ${fmt(range[0])} → ${fmt(range[1])}`);
@@ -854,6 +855,9 @@ async function finish(project, kind, sd, nest, nestInfo, applier, cams, result) 
   reportSyncWarns();
   sd.seq = await freshSeq(project, sd.seq, sd.guid);
   await addDeadMarkers(project, sd.seq, result);
+  await qcReport(project, sd, result, cams, kind);
+  saveLastRun(sd, cams, result, kind);
+  if (kind === "stacked" && applier) await eventTransitions(project, sd, cams, result);
   if (kind === "stacked") {
     if (!applier) {
       log("Timeline එකේ cut කරන්න බැරි වුණ නිසා ඔබේ timeline එකට තවත් වෙනස්කම් කළේ නැහැ. Edit එක copy sequence එකේ තියෙනවා.", "warn");
@@ -893,7 +897,9 @@ async function finish(project, kind, sd, nest, nestInfo, applier, cams, result) 
   const path = project.path;
   const seqName = sd.name;
   if (!(await project.save())) log("Project save වුණේ නැද්ද කියලා සැකයි – දිගටම යනවා", "warn");
-  const segsNest = result.segments.map((x) => ({ ...x, start: x.start - nestInfo.d, end: x.end - nestInfo.d }));
+  // trimmed head / tail (-1) can't be an angle: keep the neighbouring camera there (marked above)
+  const segsFixed = result.segments.map((x, i, a) => x.cam >= 0 ? x : { ...x, cam: (a[i + 1] && a[i + 1].cam >= 0 ? a[i + 1].cam : (a[i - 1] ? a[i - 1].cam : 0)) });
+  const segsNest = segsFixed.map((x) => ({ ...x, start: x.start - nestInfo.d, end: x.end - nestInfo.d }));
   const opts = ppro.CloseProjectOptions();
   try { opts.setPromptIfDirty(false); opts.setShowCancelButton(false); } catch (e) {}
   await project.close(opts);
@@ -1365,3 +1371,183 @@ $("qrun").onclick = qRun;
 $("qclear").onclick = () => { QUEUE = []; qSave(); qRender(); };
 $("evfind").onclick = findEvents;
 qLoad(); qRender();
+
+
+// =====================================================================================
+// Extras: options, QC markers, event transitions, learning, studio presets, stats, language
+// =====================================================================================
+function gatherExtras() {
+  const v = (id, d) => (($(id) || {}).value || d);
+  return {
+    silence: v("x_sil", "off") === "copy",
+    flash_frames: numOrNull("x_flash") || 8,
+    trim: v("x_trim", "on") === "on",
+    loudness: v("x_loud", "copy") === "copy",
+    best_mic: v("x_mic", "copy") === "copy",
+    couple: v("x_couple", "on") === "on",
+  };
+}
+
+async function qcReport(project, sd, result, cams, kind) {
+  const L = result.loudness;
+  if (L) log(`Loudness: ${L.lufs} LUFS (ඉලක්කය ${L.target}) → ${L.gain_db > 0 ? "+" : ""}${L.gain_db} dB${gatherExtras().loudness ? " copy sequence එකේ දැම්මා" : ""}`, "mute");
+  if (result.trim) log(`Smart trim: ${fmt(result.range[0])}–${fmt(result.trim[0])} සහ ${fmt(result.trim[1])}–${fmt(result.range[1])} හිස් කොටස් off කළා.`, "ok");
+  if (result.silences && result.silences.length) log(`Silence: කොටස් ${result.silences.length}ක් (${Math.round(result.silences.reduce((a, x) => a + x.end - x.start, 0))}s) copy sequence එකෙන් කපලා white flash දැම්මා.`, "ok");
+  if (((($("x_qc") || {}).value) || "on") !== "on") return;
+  const mk = [];
+  const KIND = { applause: "අත්පොළසන් / cheer", smile: "සිනහ", hug: "බදාගැනීම / emotion" };
+  for (const m of result.moments || []) mk.push({ name: `★ Moment: ${KIND[m.kind] || m.kind}`, start: m.time, dur: 0.1, comment: `score ${m.score}` });
+  for (const b of (result.bad || []).slice(0, 60)) mk.push({ name: `⚠ ${b.name}: ${b.why}`, start: b.start, dur: b.end - b.start });
+  for (const c of (result.clipping || []).slice(0, 40)) mk.push({ name: `⚠ Audio clipping ${c.name}`, start: c.start, dur: c.end - c.start });
+  for (const g of (result.mic_gaps || []).slice(0, 40)) mk.push({ name: `⚠ Mic drop-out ${g.name}`, start: g.start, dur: g.end - g.start });
+  if (result.trim) {
+    if (result.trim[0] > result.range[0]) mk.push({ name: "Smart trim (හිස්)", start: result.range[0], dur: result.trim[0] - result.range[0] });
+    if (result.trim[1] < result.range[1]) mk.push({ name: "Smart trim (හිස්)", start: result.trim[1], dur: result.range[1] - result.trim[1] });
+  }
+  if (!mk.length) return;
+  const n = await addMarkers(project, sd.seq, mk);
+  log(`QC markers ${n}: moments ${(result.moments || []).length}, weak takes ${(result.bad || []).length}, clipping ${(result.clipping || []).length}, mic gaps ${(result.mic_gaps || []).length}`, "ok");
+}
+
+async function eventTransitions(project, sd, cams, result) {
+  if (((($("x_trans") || {}).value) || "off") !== "on") return;
+  try {
+    if (!ppro.TransitionFactory || !ppro.AddTransitionOptions) { log("Transitions: මේ Premiere version එකේ API එක නැහැ.", "warn"); return; }
+    const names = await ppro.TransitionFactory.getVideoTransitionMatchNames();
+    const mn = (names || []).find((x) => /cross.?dissolve/i.test(x)) || (names || []).find((x) => /dissolve/i.test(x));
+    if (!mn) { log("Transitions: Cross Dissolve හමු වුණේ නැහැ.", "warn"); return; }
+    const segs = (result.segments || []).filter((x) => x.cam >= 0);
+    if (!segs.length) return;
+    const ends = [{ seg: segs[0], start: true }, { seg: segs[segs.length - 1], start: false }];
+    let n = 0;
+    for (const e of ends) {
+      const c = cams[e.seg.cam];
+      if (!c) continue;
+      await retryStale(async () => {
+        const seq = await freshSeq(project, sd.seq, sd.guid);
+        const hit = (await itemsOf(await seq.getVideoTrack(c.track))).find((x) => Math.abs((e.start ? x.a : x.b) - (e.start ? e.seg.start : e.seg.end)) < 0.05);
+        if (!hit) return;
+        const tr = ppro.TransitionFactory.createVideoTransition(mn);
+        const opt = ppro.AddTransitionOptions();
+        opt.setApplyToStart(e.start); opt.setDuration(tt(Math.min(1.0, (e.seg.end - e.seg.start) / 3))); opt.setForceSingleSided(true);
+        transact(project, "AutoWed transition", () => [hit.it.createAddVideoTransitionAction(tr, opt)]);
+        n++;
+      });
+    }
+    log(`Event transitions: Cross Dissolve ${n}ක් දැම්මා.`, "ok");
+  } catch (e) { log("Transitions: " + (e && e.message || e), "warn"); }
+}
+
+function saveLastRun(sd, cams, result, kind) {
+  try {
+    localStorage.setItem("autowed.lastrun", JSON.stringify({ seqGuid: sd.guid, seqName: sd.name, range: result.range, kind,
+      event: result.event, tracks: cams.map((c) => c.track), segments: result.segments }));
+  } catch (e) {}
+}
+
+async function learnFromMe() {
+  let lr = null;
+  try { lr = JSON.parse(localStorage.getItem("autowed.lastrun") || "null"); } catch (e) {}
+  if (!lr) { log("ඉගෙනගන්න කලින් Manual cutting Auto Edit එකක් කරලා, ඕන තැන් Shift+E එකෙන් වෙනස් කරන්න.", "warn"); return; }
+  if (lr.kind !== "stacked") { log("Learn වැඩ කරන්නේ Manual cutting edit එකකට විතරයි (multicam angles API එකෙන් කියවන්න බැහැ).", "warn"); return; }
+  const project = await ppro.Project.getActiveProject();
+  const seq = (await project.getSequences()).find((x) => x.guid.toString() === lr.seqGuid);
+  if (!seq) { log("කලින් edit කරපු sequence එක හමු වුණේ නැහැ.", "bad"); return; }
+  // the editor's timeline now: which camera is enabled when
+  const marks = [];
+  for (let c = 0; c < lr.tracks.length; c++) {
+    for (const x of await itemsOf(await seq.getVideoTrack(lr.tracks[c]))) {
+      if (x.b <= lr.range[0] + 0.01 || x.a >= lr.range[1] - 0.01) continue;
+      let dis = false; try { dis = await x.it.isDisabled(); } catch (e) {}
+      if (!dis) marks.push({ cam: c, start: Math.max(x.a, lr.range[0]), end: Math.min(x.b, lr.range[1]) });
+    }
+  }
+  marks.sort((a, b) => a.start - b.start);
+  const shots = [];
+  for (const m of marks) {
+    const last = shots[shots.length - 1];
+    if (last && last.cam === m.cam && m.start - last.end < 0.05) last.end = m.end; else shots.push({ ...m });
+  }
+  const avg = (a) => a.reduce((s, x) => s + (x.end - x.start), 0) / Math.max(1, a.length);
+  const auto = lr.segments.filter((x) => x.cam >= 0);
+  if (shots.length < 3) { log("ඉගෙනගන්න shots මදි.", "warn"); return; }
+  const r = await call("POST", "/api/learn", { event: lr.event, user_avg_shot: avg(shots), auto_avg_shot: avg(auto) });
+  log(`ඉගෙනගත්තා (${eventName(lr.event)}): ඔබේ සාමාන්‍ය shot ${avg(shots).toFixed(1)}s, AutoWed ${avg(auto).toFixed(1)}s → ඊළඟ පාරට shot දිග x${r.shot_scale} (samples ${r.samples})`, "ok");
+}
+
+async function showStats() {
+  const r = await call("GET", "/api/stats");
+  const f = (x) => `runs ${x.runs} · footage ${x.footage_min} min · cuts ${x.cuts} · processing ${x.processing_min} min · ඉතුරු වුණ කාලය ≈ ${x.saved_hours} h`;
+  log("Stats (සියල්ල): " + f(r.all), "ok");
+  log("Stats (දින 30): " + f(r.last_30_days), "ok");
+  log("Events: " + Object.entries(r.by_event || {}).map(([k, v]) => `${eventName(k)} ${v}`).join(", "), "mute");
+}
+
+// studio presets: every panel setting, saved as a file others can copy (Documents\AutoWed Presets)
+const PRESET_IDS = ["event", "etype", "min_shot", "max_shot", "stab", "stab_thr", "x_sil", "x_flash", "x_trim", "x_trans", "x_loud", "x_mic", "x_couple", "x_qc"];
+let STUDIO = [];
+async function presetsRefresh(quiet) {
+  try {
+    const r = await call("GET", "/api/studio_presets");
+    STUDIO = r.presets || [];
+    const sel = $("st_list");
+    sel.innerHTML = "";
+    const o0 = document.createElement("option"); o0.value = ""; o0.textContent = LANG === "en" ? "— pick —" : "— තෝරන්න —"; sel.appendChild(o0);
+    for (const p of STUDIO) { const o = document.createElement("option"); o.value = p.name; o.textContent = p.name; sel.appendChild(o); }
+    if (!quiet) log(`Presets ${STUDIO.length} · folder: ${r.folder}`, "mute");
+  } catch (e) { log("Presets: " + (e && e.message || e), "warn"); }
+}
+async function presetSave() {
+  const name = ($("st_name").value || "").trim() || "AutoWed preset";
+  const settings = {};
+  for (const id of PRESET_IDS) if ($(id)) settings[id] = $(id).value;
+  settings.tlColors = tlColors;
+  const r = await call("POST", "/api/studio_presets", { name, settings });
+  log(`Preset save කළා: ${r.path} (මේ file එක අනිත් editors ලාට දෙන්න පුළුවන්)`, "ok");
+  await presetsRefresh();
+}
+function presetApply(name) {
+  const p = STUDIO.find((x) => x.name === name);
+  if (!p) return;
+  for (const [k, v] of Object.entries(p.settings || {})) if ($(k) && k !== "tlColors") $(k).value = v;
+  if (typeof p.settings.tlColors === "boolean") { tlColors = p.settings.tlColors; try { showTlColors(); } catch (e) {} }
+  log(`Preset "${name}" දැම්මා.`, "ok");
+}
+
+// language: the panel's own labels (the log stays mostly Sinhala)
+const I18N = {
+  s0: ["0 · Sync", "0 · Sync"], s0_help: [null, "Select camera, Zoom and DJI mic files (or their bins) in the Project panel and press Sync. They are lined up by audio into a new Synced Sequence."],
+  sync_btn: [null, "Sync selected files"], s1: [null, "1 · Sequence"], s1_help: [null, "Open the synced timeline and set In (I) and Out (O) around the part to edit. AutoWed edits only that part, in that same timeline."],
+  read_btn: [null, "Read sequence"], rtest_btn: [null, "Razor test"], s2: [null, "2 · Edit"], l_event: [null, "Event"], l_etype: [null, "Edit type"],
+  l_min: [null, "Min shot (s)"], l_max: [null, "Max shot (s)"], l_stab: [null, "Shaky pieces"], o_stab_off: [null, "Don't stabilize"], o_stab_mark: [null, "Markers only"],
+  o_stab_warp: [null, "Add Warp Stabilizer"], l_stabthr: [null, "Shake limit"], l_colors: [null, "Camera colors"], s_x: [null, "Extras (silence, audio, faces, checks)"],
+  l_sil: [null, "Remove silences"], o_off: [null, "Off"], o_sil_copy: [null, "Cut them in the copy sequence"], l_flash: [null, "White flash (frames)"], l_trim: [null, "Smart trim"],
+  o_on: [null, "On (empty head/tail off)"], l_trans: [null, "Event transitions"], o_trans_on: [null, "Cross dissolve at start/end"], l_loud: [null, "Loudness"],
+  o_loud_copy: [null, "Set levels in the copy"], l_mic: [null, "Best mic + gap fill"], o_mic_copy: [null, "Best mic in the copy"], l_couple: [null, "Couple recognition"], o_on2: [null, "On"],
+  l_qc: [null, "QC markers"], o_qc_on: [null, "Moments, weak takes, clipping, mic gaps"], go_btn: [null, "Auto Edit ▶"], s3: [null, "3 · Batch (several events)"],
+  s3_help: [null, "Set In/Out, pick the event and add it to the list, or find events to build the list from markers. Then edit them all at once."],
+  qadd_btn: [null, "Add In/Out to list +"], evfind_btn: [null, "Find events"], qrun_btn: [null, "Edit the list ▶"], qclear_btn: [null, "Clear"],
+  s4: [null, "Studio (presets, learn, stats)"], l_preset: [null, "Preset"], o_pick: [null, "— pick —"], l_pname: [null, "New name"], st_save: [null, "Save preset"],
+  st_refresh: [null, "List"], learn_btn: [null, "Learn from my changes"], stats_btn: [null, "Stats"], chk_btn: [null, "Check update"], upd_btn: [null, "Update"],
+};
+let LANG = "si";
+try { LANG = localStorage.getItem("autowed.lang") || "si"; } catch (e) {}
+const I18N_SI = {};
+function applyLang() {
+  for (const el of document.querySelectorAll("[data-i18n]")) {
+    const k = el.getAttribute("data-i18n");
+    if (!(k in I18N_SI)) I18N_SI[k] = el.textContent;
+    const en = I18N[k] && I18N[k][1];
+    el.textContent = LANG === "en" && en ? en : I18N_SI[k];
+  }
+  if ($("lang")) $("lang").textContent = LANG === "en" ? "සිං" : "EN";
+}
+
+if ($("learn")) $("learn").onclick = () => learnFromMe().catch((e) => log("Learn: " + (e && e.message || e), "bad"));
+if ($("stats")) $("stats").onclick = () => showStats().catch((e) => log("Stats: " + (e && e.message || e), "bad"));
+if ($("st_save")) $("st_save").onclick = () => presetSave().catch((e) => log("Preset: " + (e && e.message || e), "bad"));
+if ($("st_refresh")) $("st_refresh").onclick = () => presetsRefresh(false);
+if ($("st_list")) $("st_list").onchange = () => presetApply($("st_list").value);
+if ($("lang")) $("lang").onclick = () => { LANG = LANG === "en" ? "si" : "en"; try { localStorage.setItem("autowed.lang", LANG); } catch (e) {} applyLang(); };
+try { applyLang(); } catch (e) {}
+setTimeout(() => { presetsRefresh(true); }, 2500);

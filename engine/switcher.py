@@ -39,9 +39,10 @@ def build_cut_grid(t0: float, t1: float, preset, beats=None, downbeats=None, phr
     for b in beats:
         if is_music(b):
             add(b, 1.0)
-    for d in downs:
+    for i, d in enumerate(downs):
         if is_music(d):
-            add(d, 0.55)
+            # every 4th bar starts a musical phrase (verse / chorus lines): the most natural cut
+            add(d, 0.35 if i % 4 == 0 else 0.55)
     for t, s in zip(ph_t, ph_s):
         if not is_music(t):
             add(t, 0.55 - 0.3 * float(s))

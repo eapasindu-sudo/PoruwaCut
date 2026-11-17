@@ -40,58 +40,89 @@
   #tlcol.on { color:#d4a24c; }
   #dbg { margin-right:6px; }
   #dbg.on { color:#d4a24c; }
+  #lang { margin-left:auto; padding:2px 8px; font-size:11px; }
+  details.sec > summary { font-size:11px; color:#9a9a9a; text-transform:uppercase; letter-spacing:1px; cursor:pointer; }
+  .btnrow button { margin:3px 3px 0 0; }
 </style>
 </head>
 <body>
-  <div class="top"><h1>Auto<span>Wed</span></h1><span id="eng" class="mute">engine…</span></div>
+  <div class="top"><h1>Auto<span>Wed</span></h1><span id="eng" class="mute">engine…</span><button id="lang" title="සිංහල / English">EN</button></div>
 
   <div id="upd"><b id="updtxt"></b><div id="updnotes" class="mute"></div>
-    <button id="updbtn" class="go" style="margin-top:6px">Update කරන්න</button></div>
+    <button id="updbtn" class="go" style="margin-top:6px" data-i18n="upd_btn">Update කරන්න</button></div>
 
   <div class="sec">
-    <b>0 · Sync</b>
-    <div class="mute" style="margin-bottom:6px">Project panel එකේ cameras, Zoom, DJI mic files (නැත්නම් ඒවා තියෙන bins) select කරලා ඔබන්න. Audio එකෙන් ගලපලා අලුත් "Synced Sequence" එකක් හදනවා.</div>
-    <button id="sync">Selected files Sync කරන්න</button>
+    <b data-i18n="s0">0 · Sync</b>
+    <div class="mute" style="margin-bottom:6px" data-i18n="s0_help">Project panel එකේ cameras, Zoom, DJI mic files (නැත්නම් ඒවා තියෙන bins) select කරලා ඔබන්න. Audio එකෙන් ගලපලා අලුත් "Synced Sequence" එකක් හදනවා.</div>
+    <button id="sync" data-i18n="sync_btn">Selected files Sync කරන්න</button>
     <div id="syncinfo" class="mute" style="margin-top:6px"></div>
   </div>
 
   <div class="sec">
-    <b>1 · Sequence</b>
-    <div class="mute" style="margin-bottom:6px">Sync කරපු timeline එක open කරලා edit කරන්න ඕන කොටසට <b>In (I)</b> සහ <b>Out (O)</b> දාන්න. AutoWed edit කරන්නේ ඒ timeline එකේම, ඒ කොටස විතරයි.</div>
-    <button id="read">Sequence කියවන්න</button> <button id="rtest" title="Manual cutting එකේ cut කිරීම ඔබේ Premiere එකේ වැඩද කියලා පොඩි test sequence එකක බලනවා">Razor test</button>
+    <b data-i18n="s1">1 · Sequence</b>
+    <div class="mute" style="margin-bottom:6px" data-i18n="s1_help">Sync කරපු timeline එක open කරලා edit කරන්න ඕන කොටසට In (I) සහ Out (O) දාන්න. AutoWed edit කරන්නේ ඒ timeline එකේම, ඒ කොටස විතරයි.</div>
+    <button id="read" data-i18n="read_btn">Sequence කියවන්න</button> <button id="rtest" data-i18n="rtest_btn" title="Manual cutting එකේ cut කිරීම ඔබේ Premiere එකේ වැඩද කියලා පොඩි test sequence එකක බලනවා">Razor test</button>
     <div id="seqinfo" class="mute" style="margin-top:6px"></div>
     <div id="tracks"></div>
   </div>
 
   <div class="sec">
-    <b>2 · Edit</b>
-    <div class="row"><label>Event</label><select id="event"></select></div>
-    <div class="row"><label>Edit වර්ගය</label>
+    <b data-i18n="s2">2 · Edit</b>
+    <div class="row"><label data-i18n="l_event">Event</label><select id="event"></select></div>
+    <div class="row"><label data-i18n="l_etype">Edit වර්ගය</label>
       <select id="etype">
         <option value="multicam">Multicamera edit</option>
         <option value="stacked">Manual cutting (stacked)</option>
       </select></div>
     <div class="hint" id="etypehint"></div>
-    <div class="row"><label>අවම shot (s)</label><input id="min_shot" type="text" placeholder="auto"></div>
-    <div class="row"><label>උපරිම shot (s)</label><input id="max_shot" type="text" placeholder="auto"></div>
-    <div class="row"><label>Shaky කෑලි</label><select id="stab">
-        <option value="off">Stabilize කරන්න එපා</option>
-        <option value="mark">Marker විතරක්</option>
-        <option value="warp" selected>Warp Stabilizer දාන්න</option>
+    <div class="row"><label data-i18n="l_min">අවම shot (s)</label><input id="min_shot" type="text" placeholder="auto"></div>
+    <div class="row"><label data-i18n="l_max">උපරිම shot (s)</label><input id="max_shot" type="text" placeholder="auto"></div>
+    <div class="row"><label data-i18n="l_stab">Shaky කෑලි</label><select id="stab">
+        <option value="off" data-i18n="o_stab_off">Stabilize කරන්න එපා</option>
+        <option value="mark" data-i18n="o_stab_mark">Marker විතරක්</option>
+        <option value="warp" selected data-i18n="o_stab_warp">Warp Stabilizer දාන්න</option>
       </select></div>
-    <div class="row"><label>Shake සීමාව</label><input id="stab_thr" type="text" placeholder="1.5"></div>
-    <div class="row"><label>Camera colors</label><button id="tlcol" title="Manual cutting: ඔබේ timeline එකේ clips වලටත් camera colors (project එක තත්පර කිහිපයකට close වෙනවා)">Timeline colors: OFF</button></div>
+    <div class="row"><label data-i18n="l_stabthr">Shake සීමාව</label><input id="stab_thr" type="text" placeholder="1.5"></div>
+    <div class="row"><label data-i18n="l_colors">Camera colors</label><button id="tlcol" title="Manual cutting: ඔබේ timeline එකේ clips වලටත් camera colors (project එක තත්පර කිහිපයකට close වෙනවා)">Timeline colors: OFF</button></div>
   </div>
 
-  <button class="go" id="go">Auto Edit ▶</button>
+  <details class="sec" id="xsec">
+    <summary data-i18n="s_x">Extras (silence, audio, faces, checks)</summary>
+    <div class="row"><label data-i18n="l_sil">Silence කපන්න</label><select id="x_sil">
+        <option value="off" data-i18n="o_off">එපා</option><option value="copy" data-i18n="o_sil_copy">Copy sequence එකේ කපන්න</option></select></div>
+    <div class="row"><label data-i18n="l_flash">White flash (frames)</label><input id="x_flash" type="text" placeholder="8"></div>
+    <div class="row"><label data-i18n="l_trim">Smart trim</label><select id="x_trim">
+        <option value="on" data-i18n="o_on">ඔව් (හිස් මුල/අග off)</option><option value="off" data-i18n="o_off">එපා</option></select></div>
+    <div class="row"><label data-i18n="l_trans">Event transitions</label><select id="x_trans">
+        <option value="off" data-i18n="o_off">එපා</option><option value="on" data-i18n="o_trans_on">මුලට/අගට Cross Dissolve</option></select></div>
+    <div class="row"><label data-i18n="l_loud">Loudness</label><select id="x_loud">
+        <option value="copy" data-i18n="o_loud_copy">Copy එකේ level හදන්න</option><option value="off" data-i18n="o_off">එපා</option></select></div>
+    <div class="row"><label data-i18n="l_mic">Best mic + gap fill</label><select id="x_mic">
+        <option value="copy" data-i18n="o_mic_copy">Copy එකේ හොඳම mic එක</option><option value="off" data-i18n="o_off">එපා</option></select></div>
+    <div class="row"><label data-i18n="l_couple">Couple recognition</label><select id="x_couple">
+        <option value="on" data-i18n="o_on2">ඔව්</option><option value="off" data-i18n="o_off">එපා</option></select></div>
+    <div class="row"><label data-i18n="l_qc">QC markers</label><select id="x_qc">
+        <option value="on" data-i18n="o_qc_on">Moments, weak takes, clipping, mic gaps</option><option value="off" data-i18n="o_off">එපා</option></select></div>
+  </details>
+
+  <button class="go" id="go" data-i18n="go_btn">Auto Edit ▶</button>
 
   <div class="sec" style="margin-top:8px">
-    <b>3 · Batch (events කිහිපයක් එකට)</b>
-    <div class="mute" style="margin-bottom:6px">In/Out දාලා event එක තෝරලා ලිස්ට් එකට දාන්න, නැත්නම් Events හොයලා markers වලින් ලිස්ට් එක හදන්න. ඊට පස්සේ එක පාරක් ඔබලා ඔක්කොම edit කරන්න.</div>
-    <button id="qadd">In/Out ලිස්ට් එකට +</button> <button id="evfind" title="Timeline එකේ audio එකෙන් speeches, ගාථා, music, බෙර කොටස් හොයලා markers දානවා">Events හොයන්න</button>
+    <b data-i18n="s3">3 · Batch (events කිහිපයක් එකට)</b>
+    <div class="mute" style="margin-bottom:6px" data-i18n="s3_help">In/Out දාලා event එක තෝරලා ලිස්ට් එකට දාන්න, නැත්නම් Events හොයලා markers වලින් ලිස්ට් එක හදන්න. ඊට පස්සේ එක පාරක් ඔබලා ඔක්කොම edit කරන්න.</div>
+    <button id="qadd" data-i18n="qadd_btn">In/Out ලිස්ට් එකට +</button> <button id="evfind" data-i18n="evfind_btn" title="Timeline එකේ audio එකෙන් speeches, ගාථා, music, බෙර කොටස් හොයලා markers දානවා">Events හොයන්න</button>
     <div id="queue" style="margin-top:6px"></div>
-    <button id="qrun" class="go" style="margin-top:6px">ලිස්ට් එක Edit කරන්න ▶</button> <button id="qclear">Clear</button>
+    <button id="qrun" class="go" style="margin-top:6px" data-i18n="qrun_btn">ලිස්ට් එක Edit කරන්න ▶</button> <button id="qclear" data-i18n="qclear_btn">Clear</button>
   </div>
+
+  <details class="sec">
+    <summary data-i18n="s4">Studio (presets, learn, stats)</summary>
+    <div class="row"><label data-i18n="l_preset">Preset</label><select id="st_list"><option value="" data-i18n="o_pick">— තෝරන්න —</option></select></div>
+    <div class="row"><label data-i18n="l_pname">නව නම</label><input id="st_name" type="text" placeholder="Endora style"></div>
+    <div class="btnrow"><button id="st_save" data-i18n="st_save">Preset save</button><button id="st_refresh" data-i18n="st_refresh">ලිස්ට් එක</button>
+      <button id="learn" data-i18n="learn_btn" title="Manual cutting edit එකට පස්සේ ඔබ Shift+E එකෙන් කරපු වෙනස්කම් වලින් ඔබේ shot දිග ඉගෙනගන්නවා">මගේ වෙනස්කම් ඉගෙනගන්න</button>
+      <button id="stats" data-i18n="stats_btn">Stats</button></div>
+  </details>
 
   <div id="prog">
     <div id="prow"><span id="pct">0%</span><span id="stage">…</span><span id="eta"></span></div>
@@ -103,7 +134,7 @@
 
   <div id="log" style="margin-top:8px"></div>
 
-  <div id="foot"><span class="mute" style="flex:1">Powered by <b style="color:#d4a24c">Endora</b></span><span class="mute" id="ver"></span><button id="dbg" title="Claude MCP debug bridge">Claude: OFF</button><button id="chk">Check update</button></div>
+  <div id="foot"><span class="mute" style="flex:1">Powered by <b style="color:#d4a24c">Endora</b></span><span class="mute" id="ver"></span><button id="dbg" title="Claude MCP debug bridge">Claude: OFF</button><button id="chk" data-i18n="chk_btn">Check update</button></div>
   <script src="main.js"></script>
 </body>
 </html>

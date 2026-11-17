@@ -13,21 +13,29 @@ from concurrent.futures import ThreadPoolExecutor
 import cv2
 import numpy as np
 
-from .faces import FaceDetector, face_features
+from .faces import FaceDetector, FaceRecognizer, face_features, smile_and_hug
 from .media import iter_frames, probe
 
 METRICS = ["sharp", "bright", "clip_hi", "clip_lo", "dx", "dy", "phase_resp",
-           "local_change", "edges", "faces", "face_area", "face_central", "face_score", "pair_central"]
+           "local_change", "edges", "faces", "face_area", "face_central", "face_score", "pair_central",
+           "smile", "hug", "couple"]
 
 ANALYSIS_WIDTH = 480
 SMALL_WIDTH = 160
-VERSION = "3"
+VERSION = "4"
+# the couple's face embeddings (found by find_couple before the analysis), used for the "couple" metric
+COUPLE = {"centroids": None, "key": ""}
+
+
+def set_couple(centroids):
+    COUPLE["centroids"] = None if centroids is None or len(centroids) == 0 else np.asarray(centroids, np.float32)
+    COUPLE["key"] = "" if COUPLE["centroids"] is None else hashlib.sha1(COUPLE["centroids"].tobytes()).hexdigest()[:8]
 CHUNK_LEN = 60.0  # seconds per analysed segment (smaller = smoother live progress)
 
 
 def _cache_path(cache_dir: str, path: str, chunk_start: float, chunk_len: float, fps: float) -> str:
     st = os.stat(path)
-    key = f"{VERSION}|{os.path.abspath(path)}|{st.st_size}|{int(st.st_mtime)}|{chunk_start}|{chunk_len}|{fps}"
+    key = f"{VERSION}|{COUPLE['key']}|{os.path.abspath(path)}|{st.st_size}|{int(st.st_mtime)}|{chunk_start}|{chunk_len}|{fps}"
     h = hashlib.sha1(key.encode()).hexdigest()[:16]
     base = os.path.splitext(os.path.basename(path))[0]
     return os.path.join(cache_dir, f"{base}_{int(chunk_start):06d}_{h}.npz")
@@ -37,6 +45,8 @@ def _analyze_chunk(path: str, start: float, length: float, fps: float, use_gpu: 
     n = int(round(length * fps))
     out = {m: np.full(n, np.nan, np.float32) for m in METRICS}
     det = FaceDetector(use_gpu)
+    cents = COUPLE["centroids"]
+    rec = FaceRecognizer() if cents is not None else None
     prev_small = None
     win = None
     last_face = None
@@ -74,8 +84,26 @@ def _analyze_chunk(path: str, start: float, length: float, fps: float, use_gpu: 
         prev_small = small
 
         if k % 2 == 0 or last_face is None:  # faces change slowly: detect on every 2nd frame
-            last_face = face_features(det.detect(frame), w, h)
-        c, area, central, score, pair = last_face
+            full = det.detect_full(frame) if det.kind == "yunet" else None
+            ff = face_features(det.detect(frame, full), w, h)
+            sm, hg = smile_and_hug(full, w, h) if full is not None else (0.0, 0.0)
+            cp = 0.0
+            if rec is not None and rec.ok and full is not None and len(full):
+                big = full[np.argsort(-(full[:, 2] * full[:, 3]))[:3]]
+                hits = set()
+                for row in big:
+                    if row[2] * row[3] < 0.003 * w * h:
+                        continue
+                    e = rec.embed(frame, row)
+                    if e is None:
+                        continue
+                    sim = cents @ e
+                    if sim.max() > 0.40:
+                        hits.add(int(sim.argmax()))
+                cp = float(len(hits))
+            last_face = (*ff, sm, hg, cp)
+        c, area, central, score, pair, sm, hg, cp = last_face
+        out["smile"][k], out["hug"][k], out["couple"][k] = sm, hg, cp
         out["faces"][k], out["face_area"][k] = c, area
         out["face_central"][k], out["face_score"][k] = central, score
         out["pair_central"][k] = pair
@@ -115,7 +143,7 @@ def analyze_file(path: str, f_start: float, f_end: float, fps: float, cache_dir:
     total = {m: [] for m in METRICS}
     for ci, d in parts:
         for m in METRICS:
-            total[m].append(d[m])
+            total[m].append(d[m] if m in d else np.full(len(d["sharp"]), np.nan, np.float32))
     full = {m: np.concatenate(total[m]) for m in METRICS}
     base_j = int(round(c0 * chunk_len * fps))
     s, e = j0 - base_j, j1 - base_j
@@ -184,3 +212,73 @@ def analyze_cameras(cams: list[dict], t0: float, t1: float, fps: float, cache_di
     for i in range(len(cams)):
         aligned[i]["detector"] = detectors.get(i, "?")
     return {"times": grid, "fps": fps, "cams": aligned}
+
+
+def find_couple(cams: list[dict], t0: float, t1: float, use_gpu: bool = True, per_cam: int = 60,
+                log=print, progress=None):
+    """Sample frames across all cameras, embed the faces, and return the two face identities that are
+    seen most and most centrally (the bride and groom). None when the recognition model is missing."""
+    rec = FaceRecognizer()
+    if not rec.ok:
+        return None
+    det = FaceDetector(use_gpu)
+    if det.kind != "yunet":
+        return None
+    embs, weights = [], []
+    from .media import grab_frame
+    # a few dozen single frames per camera, spread over the range (fast seeks, no full decode)
+    samples = []
+    for cam in cams:
+        span = [(cl, max(t0, cl["tl_start"]), min(t1, cl["tl_end"])) for cl in cam["clips"]]
+        span = [s_ for s_ in span if s_[2] - s_[1] > 2]
+        tot = sum(b - a for _, a, b in span)
+        if tot <= 0:
+            continue
+        step = max(3.0, tot / per_cam)
+        for cl, a, b in span:
+            t = a + step / 2
+            while t < b:
+                samples.append((cl, t))
+                t += step
+    jobs = samples
+    for n, (cl, tt_) in enumerate(jobs):
+        try:
+            frame = grab_frame(cl["path"], tt_ - cl["offset"], ANALYSIS_WIDTH)
+            if frame is not None:
+                h, w = frame.shape[:2]
+                full = det.detect_full(frame)
+                for row in full[np.argsort(-(full[:, 2] * full[:, 3]))[:3]] if len(full) else []:
+                    if row[2] * row[3] < 0.004 * w * h:
+                        continue
+                    e = rec.embed(frame, row)
+                    if e is None:
+                        continue
+                    cx = (row[0] + row[2] / 2) / w
+                    embs.append(e)
+                    weights.append((1.2 - abs(cx - 0.5)) * min(1.0, row[2] * row[3] / (0.02 * w * h)))
+        except Exception:  # noqa: BLE001
+            continue
+        if progress:
+            progress((n + 1) / len(jobs))
+    if len(embs) < 12:
+        return None
+    E = np.stack(embs)
+    W = np.asarray(weights, np.float32)
+    # greedy clustering by cosine similarity
+    centers, mass = [], []
+    for e, wt in sorted(zip(E, W), key=lambda x: -x[1]):
+        if centers:
+            sims = np.array([c @ e / (np.linalg.norm(c) + 1e-9) for c in centers])
+            i = int(sims.argmax())
+            if sims[i] > 0.42:
+                centers[i] = centers[i] + wt * e
+                mass[i] += wt
+                continue
+        centers.append(wt * e)
+        mass.append(wt)
+    order = np.argsort(-np.asarray(mass))[:2]
+    if len(order) < 2 or mass[order[1]] < 0.25 * mass[order[0]]:
+        order = order[:1]
+    cents = [centers[i] / (np.linalg.norm(centers[i]) + 1e-9) for i in order]
+    log(f"  couple recognition: faces {len(embs)} · identities {len(centers)} · couple {len(cents)}")
+    return np.stack(cents)

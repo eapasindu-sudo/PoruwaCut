@@ -29,6 +29,8 @@ class EventPreset:
     w_obstruct: float = 1.5
     w_face: float = 1.0
     w_couple: float = 1.0         # the couple framed in the centre
+    w_couple_id: float = 0.7      # the bride / groom recognised in the shot (face recognition)
+    w_smile: float = 0.35         # smiling faces
     shake_ref: float = 0.010      # jitter that costs 1 point
     pan_limit: float = 0.30       # frame widths / s before a move counts as a whip
     rhythm_forgive: float = 0.0   # 0..1 handheld movement that follows the music is fine

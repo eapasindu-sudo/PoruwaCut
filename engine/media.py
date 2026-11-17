@@ -158,3 +158,19 @@ def extract_audio(path: str, rate: int = 8000, start: float = 0.0, duration: flo
     cmd += ["-ar", str(rate), "-f", "f32le", "-"]
     out = subprocess.run(cmd, capture_output=True, check=False, **NOWIN).stdout
     return np.frombuffer(out, np.float32).copy()
+
+
+def grab_frame(path: str, t: float, width: int = 480):
+    """One BGR frame at file time t (fast keyframe seek), or None."""
+    import numpy as _np
+    try:
+        info = probe(path)
+        h = int(round(info.height * width / info.width / 2)) * 2
+        cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-ss", f"{max(0.0, t):.3f}", "-i", path,
+               "-frames:v", "1", "-an", "-vf", f"scale={width}:{h}:flags=area", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
+        out = subprocess.run(cmd, capture_output=True, timeout=20, **NOWIN).stdout
+        if len(out) < width * h * 3:
+            return None
+        return _np.frombuffer(out[: width * h * 3], _np.uint8).reshape(h, width, 3)
+    except Exception:  # noqa: BLE001
+        return None

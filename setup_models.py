@@ -24,3 +24,20 @@ else:
 import cv2  # noqa: E402
 cv2.FaceDetectorYN.create(DEST, "", (320, 240))
 print("Model loads fine in OpenCV", cv2.__version__)
+
+# Optional: SFace face recognition (Apache-2.0, OpenCV Zoo) -> bride / groom recognition.
+SFACE_URL = ("https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/"
+             "face_recognition_sface_2021dec.onnx")
+SFACE = os.path.join(os.path.dirname(DEST), "face_recognition_sface_2021dec.onnx")
+try:
+    if not (os.path.exists(SFACE) and os.path.getsize(SFACE) > 1_000_000):
+        print("Downloading SFace recognition model...")
+        urllib.request.urlretrieve(SFACE_URL, SFACE)
+    if os.path.getsize(SFACE) < 1_000_000:
+        os.remove(SFACE)
+        print("SFace download failed (too small) - couple recognition will be off")
+    else:
+        cv2.FaceRecognizerSF.create(SFACE, "")
+        print(f"SFace OK ({os.path.getsize(SFACE) // 1024} KB)")
+except Exception as e:  # noqa: BLE001
+    print("SFace skipped:", e)

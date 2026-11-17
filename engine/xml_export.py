@@ -67,6 +67,50 @@ def _keep_intervals(t0, t1, dead, remove_dead):
     return [(x, y) for x, y in out if y - x > 0.05]
 
 
+def _subtract(keep, cut):
+    out = []
+    for a, b in keep:
+        parts = [(a, b)]
+        for c in sorted(cut, key=lambda d: d["start"]):
+            nxt = []
+            for x, y in parts:
+                if c["end"] <= x or c["start"] >= y:
+                    nxt.append((x, y))
+                    continue
+                if c["start"] > x:
+                    nxt.append((x, c["start"]))
+                if c["end"] < y:
+                    nxt.append((c["end"], y))
+            parts = nxt
+        out += parts
+    return [(x, y) for x, y in out if y - x > 0.05]
+
+
+def _flash_track(joins, fps, frames):
+    """White flash at each join: an 8-frame white matte that fades in and out (dip to white)."""
+    if not joins or frames <= 0:
+        return ""
+    half = max(1, frames // 2)
+    items = []
+    for n, f in enumerate(joins):
+        st, en = max(0, f - half), f - half + frames
+        white = ('<effect><name>Color</name><effectid>Color</effectid><effectcategory>Matte</effectcategory>'
+                 '<effecttype>generator</effecttype><mediatype>video</mediatype>'
+                 '<parameter><parameterid>fillcolor</parameterid><name>Color</name>'
+                 '<value><alpha>255</alpha><red>255</red><green>255</green><blue>255</blue></value></parameter></effect>')
+        dis = ('<effect><name>Cross Dissolve</name><effectid>Cross Dissolve</effectid>'
+               '<effectcategory>Dissolve</effectcategory><effecttype>transition</effecttype>'
+               '<mediatype>video</mediatype><wipecode>0</wipecode><wipeaccuracy>100</wipeaccuracy>'
+               '<startratio>0</startratio><endratio>1</endratio><reverse>FALSE</reverse></effect>')
+        items.append(f'<transitionitem>{_rate(fps)}<start>{st}</start><end>{st + half}</end>'
+                     f'<alignment>start</alignment>{dis}</transitionitem>')
+        items.append(f'<generatoritem id="flash-{n + 1}"><name>White flash</name><duration>{frames}</duration>'
+                     f'{_rate(fps)}<start>{st}</start><end>{en}</end><in>0</in><out>{frames}</out>{white}</generatoritem>')
+        items.append(f'<transitionitem>{_rate(fps)}<start>{en - half}</start><end>{en}</end>'
+                     f'<alignment>end</alignment>{dis}</transitionitem>')
+    return "".join(items)
+
+
 def build_xml(project: dict, result: dict, out_path: str, layout: str = "stacked",
               remove_dead: bool = False, seq_name: str | None = None) -> str:
     fps = float(project["fps"])
@@ -74,6 +118,15 @@ def build_xml(project: dict, result: dict, out_path: str, layout: str = "stacked
     segs = result["segments"]
     dead = result.get("dead", [])
     keep = _keep_intervals(t0, t1, dead, remove_dead)
+    ex = result.get("copy_edit") or {}
+    tr = result.get("trim")
+    if ex.get("trim") and tr:
+        keep = _subtract(keep, [{"start": t0, "end": tr[0]}, {"start": tr[1], "end": t1}])
+    if ex.get("silence") and result.get("silences"):
+        keep = _subtract(keep, result["silences"])
+    mic = result.get("mic_choice") if ex.get("best_mic") else None
+    gaps = result.get("mic_gaps") if ex.get("best_mic") else None
+    gain_db = (result.get("loudness") or {}).get("gain_db", 0.0) if ex.get("loudness") else 0.0
 
     # master-time -> sequence-frame mapping (ripple over removed parts)
     def seq_frame(t):
@@ -107,6 +160,29 @@ def build_xml(project: dict, result: dict, out_path: str, layout: str = "stacked
     files = _Files()
     cid = [0]
 
+    def chosen_track(a, b):
+        """Which audio track should be heard over [a, b) (None = all)."""
+        if not mic:
+            return None
+        mid = (a + b) / 2
+        for g in gaps or []:
+            if g["start"] <= mid < g["end"]:
+                # the main mic dropped out: the next best track over this moment
+                alt = [m for m in mic if m["track"] != g["track"] and m["track"] >= 0]
+                return alt[0]["track"] if alt else None
+        for m_ in mic:
+            if m_["start"] <= mid < m_["end"]:
+                return m_["track"] if m_["track"] >= 0 else None
+        return None
+
+    def mic_cuts():
+        pts = set()
+        for m_ in mic or []:
+            pts |= {m_["start"], m_["end"]}
+        for g in gaps or []:
+            pts |= {g["start"], g["end"]}
+        return sorted(pts)
+
     def clipitem(cl, a, b, enabled=True, audio_track=None, cam=None):
         cid[0] += 1
         mi = files.info.get(cl["path"]) or probe(cl["path"])
@@ -125,6 +201,13 @@ def build_xml(project: dict, result: dict, out_path: str, layout: str = "stacked
             x += f"<labels><label2>{LABEL_NAMES[label_index_for_cam(cam)]}</label2></labels>"
         if audio_track is not None:
             x += f"<sourcetrack><mediatype>audio</mediatype><trackindex>{audio_track}</trackindex></sourcetrack>"
+            if gain_db:
+                lin = 10 ** (gain_db / 20)
+                x += ('<filter><effect><name>Audio Levels</name><effectid>audiolevels</effectid>'
+                      '<effectcategory>audiolevels</effectcategory><effecttype>audiolevels</effecttype>'
+                      '<mediatype>audio</mediatype><parameter><parameterid>level</parameterid><name>Level</name>'
+                      f'<valuemin>0</valuemin><valuemax>3.98109</valuemax><value>{lin:.5f}</value></parameter>'
+                      '</effect></filter>')
         return x + "</clipitem>"
 
     C = len(project["cameras"])
@@ -157,6 +240,7 @@ def build_xml(project: dict, result: dict, out_path: str, layout: str = "stacked
     mclips = project["cameras"][m]["clips"]
     atracks = []
     if project.get("audio_tracks"):
+        mc = mic_cuts()
         # audio layout copied from the user's Premiere sequence (e.g. DJI mic 1 on A1, mic 2 on A2).
         # The n-th track that uses a file gets that file's n-th audio channel.
         seen = {}
@@ -168,9 +252,14 @@ def build_xml(project: dict, result: dict, out_path: str, layout: str = "stacked
                     used_here.add(cl["path"])
                     seen[cl["path"]] = seen.get(cl["path"], 0) + 1
                 ch = cl.get("channel") or seen[cl["path"]]
+                ti = len(atracks)
                 for a, b in keep:
                     for c2, x, y in pieces_of([cl], a, b):
-                        items.append(clipitem(c2, x, y, audio_track=ch))
+                        # best mic: split at mic changes, only the chosen track stays enabled
+                        pts = [x] + [p for p in mc if x < p < y] + [y]
+                        for p, q in zip(pts[:-1], pts[1:]):
+                            want = chosen_track(p, q)
+                            items.append(clipitem(c2, p, q, enabled=(want is None or want == ti), audio_track=ch))
             atracks.append("".join(items))
     else:
         # default: master camera channels (DJI mic 1, DJI mic 2) on their own tracks
@@ -183,6 +272,15 @@ def build_xml(project: dict, result: dict, out_path: str, layout: str = "stacked
             atracks.append("".join(items))
 
     total = seq_frame(t1)
+    joins = []
+    if ex.get("silence") and result.get("silences"):
+        sil_starts = [d["start"] for d in result["silences"]]
+        for (a1, b1), (a2, b2) in zip(keep[:-1], keep[1:]):
+            if any(abs(b1 - s0) < 0.02 for s0 in sil_starts):
+                joins.append(seq_frame(b1))
+    ft = _flash_track(joins, fps, int(ex.get("flash_frames", 0) or 0))
+    if ft:
+        vtracks.append(ft)
     first = probe(mclips[0]["path"])
     markers = []
     for d in dead:
