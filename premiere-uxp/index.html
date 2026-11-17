@@ -32,7 +32,12 @@
   #log { background:#161616; border:1px solid #333; border-radius:4px; padding:6px; height:130px; overflow-y:scroll; font-size:11px; white-space:pre-wrap; }
   #foot { display:flex; align-items:center; justify-content:flex-end; margin-top:6px; padding-top:6px; border-top:1px solid #2e2e2e; }
   #foot .mute { margin-right:8px; font-size:11px; }
-  #chk, #dbg { padding:4px 10px; font-size:11px; }
+  #chk, #dbg, #tlcol { padding:4px 10px; font-size:11px; }
+  .qrow { display:flex; gap:6px; align-items:center; padding:3px 0; border-bottom:1px solid #2a2a2a; font-size:11px; }
+  .qrow span { flex:1; }
+  .qrow select { font-size:11px; }
+  .qrow button { padding:1px 6px; }
+  #tlcol.on { color:#d4a24c; }
   #dbg { margin-right:6px; }
   #dbg.on { color:#d4a24c; }
 </style>
@@ -42,6 +47,13 @@
 
   <div id="upd"><b id="updtxt"></b><div id="updnotes" class="mute"></div>
     <button id="updbtn" class="go" style="margin-top:6px">Update කරන්න</button></div>
+
+  <div class="sec">
+    <b>0 · Sync</b>
+    <div class="mute" style="margin-bottom:6px">Project panel එකේ cameras, Zoom, DJI mic files (නැත්නම් ඒවා තියෙන bins) select කරලා ඔබන්න. Audio එකෙන් ගලපලා අලුත් "Synced Sequence" එකක් හදනවා.</div>
+    <button id="sync">Selected files Sync කරන්න</button>
+    <div id="syncinfo" class="mute" style="margin-top:6px"></div>
+  </div>
 
   <div class="sec">
     <b>1 · Sequence</b>
@@ -62,9 +74,24 @@
     <div class="hint" id="etypehint"></div>
     <div class="row"><label>අවම shot (s)</label><input id="min_shot" type="text" placeholder="auto"></div>
     <div class="row"><label>උපරිම shot (s)</label><input id="max_shot" type="text" placeholder="auto"></div>
+    <div class="row"><label>Shaky කෑලි</label><select id="stab">
+        <option value="off">Stabilize කරන්න එපා</option>
+        <option value="mark">Marker විතරක්</option>
+        <option value="warp" selected>Warp Stabilizer දාන්න</option>
+      </select></div>
+    <div class="row"><label>Shake සීමාව</label><input id="stab_thr" type="text" placeholder="1.5"></div>
+    <div class="row"><label>Camera colors</label><button id="tlcol" title="Manual cutting: ඔබේ timeline එකේ clips වලටත් camera colors (project එක තත්පර කිහිපයකට close වෙනවා)">Timeline colors: OFF</button></div>
   </div>
 
   <button class="go" id="go">Auto Edit ▶</button>
+
+  <div class="sec" style="margin-top:8px">
+    <b>3 · Batch (events කිහිපයක් එකට)</b>
+    <div class="mute" style="margin-bottom:6px">In/Out දාලා event එක තෝරලා ලිස්ට් එකට දාන්න, නැත්නම් Events හොයලා markers වලින් ලිස්ට් එක හදන්න. ඊට පස්සේ එක පාරක් ඔබලා ඔක්කොම edit කරන්න.</div>
+    <button id="qadd">In/Out ලිස්ට් එකට +</button> <button id="evfind" title="Timeline එකේ audio එකෙන් speeches, ගාථා, music, බෙර කොටස් හොයලා markers දානවා">Events හොයන්න</button>
+    <div id="queue" style="margin-top:6px"></div>
+    <button id="qrun" class="go" style="margin-top:6px">ලිස්ට් එක Edit කරන්න ▶</button> <button id="qclear">Clear</button>
+  </div>
 
   <div id="prog">
     <div id="prow"><span id="pct">0%</span><span id="stage">…</span><span id="eta"></span></div>

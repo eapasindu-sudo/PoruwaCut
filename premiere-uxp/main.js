@@ -215,7 +215,7 @@ async function readItem(item) {
   return { start, end, srcIn, speed, path, why, name: await item.getName() };
 }
 
-async function readSequence() {
+async function readSequence(rangeOverride) {
   $("tracks").innerHTML = "";
   const project = await ppro.Project.getActiveProject();
   const seq = project && (await project.getActiveSequence());
@@ -225,8 +225,9 @@ async function readSequence() {
   const endT = (await seq.getEndTime()).seconds;
   let inT = 0, outT = endT;
   try { inT = (await seq.getInPoint()).seconds; outT = (await seq.getOutPoint()).seconds; } catch (e) {}
+  if (rangeOverride) { inT = rangeOverride[0]; outT = rangeOverride[1]; }   // a batch job's own range
   // In/Out must be set by the editor: AutoWed only ever touches that part of the timeline
-  const hasInOut = outT > inT + 0.5 && !(inT < 0.01 && Math.abs(outT - endT) < 0.05);
+  const hasInOut = rangeOverride ? outT > inT + 0.5 : (outT > inT + 0.5 && !(inT < 0.01 && Math.abs(outT - endT) < 0.05));
   const cams = [], warnings = [], nests = [];
   const vCount = await seq.getVideoTrackCount();
   for (let t = 0; t < vCount; t++) {
@@ -540,7 +541,7 @@ function makeApplier(project, target, kind, cutTracks, trackOfCam, rangeT0, rang
     if (kind !== "stacked") return;
     await tgt();
     const camAt = (t) => { for (const s of segments) if (t >= s.start - 1e-3 && t < s.end + 1e-3) return s.cam; return null; };
-    const acts = [];
+    const todo = [];
     let processed = enabledUntil;
     for (let c = 0; c < trackOfCam.length; c++) {
       for (const { it, a, b } of await itemsOf(async () => (await tgt()).getVideoTrack(trackOfCam[c]))) {
@@ -551,10 +552,22 @@ function makeApplier(project, target, kind, cutTracks, trackOfCam, rangeT0, rang
         const want = chosen !== c;
         let cur = false;
         try { cur = await it.isDisabled(); } catch (e) {}
-        if (cur !== want) acts.push(it.createSetDisabledAction(want));
+        if (cur !== want) todo.push({ c, a, b, want });
       }
     }
-    if (acts.length) transact(project, "AutoWed angles", () => acts);
+    // Premiere 26.5 invalidates every clip object after each edit, so several clips in ONE
+    // transaction fail after the first. One clip per transaction, each looked up fresh.
+    for (const x of todo) {
+      await retryStale(async () => {
+        const hit = (await itemsOf(async () => (await tgt()).getVideoTrack(trackOfCam[x.c])))
+          .find((y) => Math.abs(y.a - x.a) < 0.01 && Math.abs(y.b - x.b) < 0.01);
+        if (!hit) return;
+        const it = hit.it;
+        let cur = false;
+        try { cur = await it.isDisabled(); } catch (e) {}
+        if (cur !== x.want) transact(project, "AutoWed angles", () => [it.createSetDisabledAction(x.want)]);
+      });
+    }
     enabledUntil = processed;
   }
   return {
@@ -694,6 +707,11 @@ async function nestInPlace(project, sd, range) {
   return { track: vIdx, it: placed.it, start: placed.a, end: placed.b, srcIn, name: nName, guid: nGuid };
 }
 
+function eventName(id) {
+  for (const o of $("event").options || []) if (o.value === id) return o.textContent.split("  ·  ")[0];
+  return id;
+}
+
 // ---------- the main flow ----------
 async function autoEdit() {
   if (busy) return;
@@ -703,9 +721,11 @@ async function autoEdit() {
   finally { busy = false; $("go").disabled = false; }
 }
 
-async function runAutoEdit() {
-  const sd = await readSequence();
-  if (!sd) return;
+async function runAutoEdit(jobOpts) {
+  // jobOpts (batch): { range, event, kind } instead of the panel's In/Out and selects
+  jobOpts = jobOpts || {};
+  const sd = await readSequence(jobOpts.range);
+  if (!sd) return false;
   if (!sd.hasInOut) { log("මුලින්ම timeline එකේ edit කරන්න ඕන කොටසට In (I) සහ Out (O) දාන්න. AutoWed edit කරන්නේ ඒ කොටස විතරයි.", "bad"); return; }
   if (!(await ping())) {
     log("Engine එකට සම්බන්ධ වෙන්න බැහැ. Start menu › AutoWed › AutoWed Engine run කරලා ආයෙ උත්සාහ කරන්න.", "bad");
@@ -714,11 +734,10 @@ async function runAutoEdit() {
   }
   const project = await ppro.Project.getActiveProject();
   sd.guid = sd.seq.guid.toString();
-  const kind = $("etype").value;
+  const kind = jobOpts.kind || $("etype").value;
   const range = [sd.inT, sd.outT];
-  const event = $("event").value || "auto";
-  const opt = $("event").selectedOptions && $("event").selectedOptions[0];
-  const evName = opt ? opt.textContent.split("  ·  ")[0] : event;
+  const event = jobOpts.event || $("event").value || "auto";
+  const evName = eventName(event);
   showProgress("prepare", 0, null);
 
   let cams, applier, nest = null, nestInfo = null;
@@ -768,6 +787,7 @@ async function runAutoEdit() {
           // one bad round does not end the live edit: the next round picks up from where it is
           applyFails++;
           log("Timeline cut: " + (e && e.message || e) + (applyFails < 4 ? " — ඊළඟ වටයේ ආයෙ උත්සාහ කරනවා" : ""), "warn");
+          if (e && e.stack) log("  " + String(e.stack).split("\n").slice(0, 4).join(" | "), "mute");
           if (applyFails >= 4) {
             log("Live cuts නැවැත්තුවා. Analysis එක ඉවර වෙනකම් යනවා (strip එකේ ප්‍රතිඵලය බලන්න).", "warn");
             applier = null;
@@ -775,18 +795,31 @@ async function runAutoEdit() {
         }
       }
     }
-    if (j.status === "error") return;
-    if (j.status === "done") { await finish(project, kind, sd, nest, nestInfo, applier, cams, j.result); return; }
+    if (j.status === "error") return false;
+    if (j.status === "done") { await finish(project, kind, sd, nest, nestInfo, applier, cams, j.result); return true; }
   }
+}
+
+// one marker per transaction (Premiere 26.5 invalidates objects after every edit)
+async function addMarkers(project, seq, list) {
+  const g = seq.guid.toString();
+  let n = 0;
+  for (const m of list) {
+    try {
+      await retryStale(async () => {
+        const markers = await ppro.Markers.getMarkers(await freshSeq(project, seq, g));
+        transact(project, "AutoWed markers", () => [markers.createAddMarkerAction(m.name, m.type || "Comment",
+          tt(m.start), tt(Math.max(0.1, m.dur || 0.1)), m.comment || "AutoWed")]);
+      });
+      n++;
+    } catch (e) { log("Marker: " + (e && e.message || e), "warn"); }
+  }
+  return n;
 }
 
 async function addDeadMarkers(project, seq, result) {
   if (!result.dead || !result.dead.length) return;
-  try {
-    const markers = await ppro.Markers.getMarkers(seq);
-    transact(project, "AutoWed markers", () => result.dead.map((d) =>
-      markers.createAddMarkerAction("CHECK – කැමරා සියල්ල දුර්වලයි", "Comment", tt(d.start), tt(Math.max(0.1, d.end - d.start)), "AutoWed")));
-  } catch (e) { log("Markers: " + e, "warn"); }
+  await addMarkers(project, seq, result.dead.map((d) => ({ name: "CHECK – කැමරා සියල්ල දුර්වලයි", start: d.start, dur: d.end - d.start })));
 }
 
 function stamp() {
@@ -831,8 +864,9 @@ async function finish(project, kind, sd, nest, nestInfo, applier, cams, result) 
     }
     // camera colors: Premiere's API cannot set a timeline clip's label, so (like multicam angles) they
     // are written into the saved project file: save, close for a few seconds, write, reopen
+    await stabilizePieces(project, sd, cams, result, "stacked");
     let proj = project;
-    try {
+    if (tlColors) try {
       log("Camera colors දානවා: project එක save කරලා තත්පර කිහිපයකට close කරනවා…");
       const path = project.path, seqName = sd.name;
       await project.save();
@@ -877,6 +911,10 @@ async function finish(project, kind, sd, nest, nestInfo, applier, cams, result) 
     if (e) await opened.openSequence(e);
   } catch (e) {}
   await importCopy(opened, result);
+  try {   // multicam pieces can't take Warp Stabilizer directly: shaky ones get markers
+    const e = (await opened.getSequences()).find((x) => x.name === seqName);
+    if (e) await stabilizePieces(opened, { seq: e, guid: e.guid.toString() }, cams, result, "multicam");
+  } catch (e) {}
   if (r.error) { log("Multicam angles ලියන්න බැරි වුණා: " + r.error + " (project එක වෙනස් වුණේ නැහැ)", "bad"); return; }
   showProgress("done", 1, null);
   log(`✔ ඉවරයි · multicam pieces ${r.report.multicam} · cuts ${s.cuts} · සාමාන්‍ය shot ${s.avg_shot}s`, "ok");
@@ -954,6 +992,9 @@ setInterval(ping, 15000);
 // ---------- Claude debug bridge (MCP) ----------
 // When "Claude: ON", the panel asks the engine for commands that Claude sent through the AutoWed MCP
 // server (read the timeline, the log, run a test) and sends the answers back. Off by default.
+let tlColors = false;   // Manual cutting: also color the clips in the user's own timeline (needs a project close/reopen)
+try { tlColors = localStorage.getItem("autowed.tlcolors") === "1"; } catch (e) {}
+function showTlColors() { const b = $("tlcol"); if (!b) return; b.textContent = tlColors ? "Timeline colors: ON" : "Timeline colors: OFF"; b.className = tlColors ? "on" : ""; }
 let bridgeOn = false;
 try { bridgeOn = localStorage.getItem("autowed.bridge") === "1"; } catch (e) {}
 function showBridge() { const b = $("dbg"); b.textContent = bridgeOn ? "Claude: ON" : "Claude: OFF"; b.className = bridgeOn ? "on" : ""; }
@@ -1055,3 +1096,272 @@ $("dbg").onclick = () => {
 };
 showBridge();
 bridgeLoop();
+if ($("tlcol")) $("tlcol").onclick = () => {
+  tlColors = !tlColors;
+  try { localStorage.setItem("autowed.tlcolors", tlColors ? "1" : "0"); } catch (e) {}
+  showTlColors();
+  log(tlColors ? "Timeline colors ON: Manual cutting ඉවර වුණාම project එක තත්පර කිහිපයකට close වෙලා camera colors දානවා." : "Timeline colors OFF: colors copy sequence එකේ විතරයි, close/open නැහැ.", "mute");
+};
+showTlColors();
+
+// =====================================================================================
+// 0 · Sync: line up selected camera / recorder / mic files by audio -> new Synced Sequence
+// =====================================================================================
+async function collectClips(items, out = [], depth = 0) {
+  for (const it of items) {
+    let isBin = false;
+    try { isBin = it.type === ppro.Constants.ProjectItemType.BIN; } catch (e) {}
+    if (isBin && depth < 6) {
+      try { await collectClips(await ppro.FolderItem.cast(it).getItems(), out, depth + 1); } catch (e) {}
+      continue;
+    }
+    try {
+      const ci = ppro.ClipProjectItem.cast(it);
+      if (await ci.isSequence()) continue;
+      const path = await ci.getMediaFilePath();
+      if (!path || !/[\\/]/.test(path)) continue;          // titles, mattes, graphics
+      if (!out.some((x) => x.path === path)) out.push({ path, name: it.name, item: ci });
+    } catch (e) {}
+  }
+  return out;
+}
+
+async function runSync() {
+  if (busy) return;
+  busy = true; $("sync").disabled = true; $("go").disabled = true;
+  try {
+    const project = await ppro.Project.getActiveProject();
+    if (!project) { log("Project එකක් open කරලා නැහැ.", "bad"); return; }
+    if (!ppro.ProjectUtils || typeof ppro.ProjectUtils.getSelection !== "function") {
+      log("මේ Premiere version එකේ Project panel selection කියවන්න බැහැ (ProjectUtils.getSelection නැහැ).", "bad"); return;
+    }
+    const sel = await ppro.ProjectUtils.getSelection(project);
+    const files = await collectClips(sel ? await sel.getItems() : []);
+    if (files.length < 2) { log("Project panel එකේ sync කරන්න ඕන files (හෝ ඒවා තියෙන bins) select කරලා ආයෙ ඔබන්න. files 2ක් වත් ඕන.", "bad"); return; }
+    if (!(await ping())) { log("Engine එකට සම්බන්ධ වෙන්න බැහැ.", "bad"); return; }
+    log(`Sync: files ${files.length}ක් audio එකෙන් ගලපනවා…`);
+    const job = (await call("POST", "/api/sync", { files: files.map((f) => ({ path: f.path, name: f.name })) })).job;
+    let res = null;
+    while (true) {
+      await sleep(1000);
+      let j;
+      try { j = await call("GET", "/api/job/" + job); } catch (e) { continue; }
+      $("syncinfo").textContent = `${Math.round((j.progress || 0) * 100)}% · ${j.stage_text || j.stage || ""}`;
+      if (j.status === "error") { for (const l of j.log) log(l, l.startsWith("ERROR") ? "bad" : "mute"); return; }
+      if (j.status === "done") { res = j.result; break; }
+    }
+    await buildSyncedSequence(project, files, res);
+  } catch (e) {
+    log("Sync: " + (e && e.message || e), "bad");
+    if (e && e.stack) log("  " + String(e.stack).split("\n").slice(0, 3).join(" | "), "mute");
+  } finally { busy = false; $("sync").disabled = false; $("go").disabled = false; }
+}
+
+async function buildSyncedSequence(project, files, res) {
+  const byPath = new Map(files.map((f) => [f.path, f]));
+  const pl = res.placements.filter((p) => byPath.has(p.path));
+  const firstVid = pl.filter((p) => p.has_video && !p.unsynced).sort((a, b) => a.start - b.start)[0];
+  if (!firstVid) { log("Sync: video file එකක් නැති නිසා sequence එකක් හදන්න බැහැ.", "bad"); return; }
+  const name = await uniqueName(project, `Synced Sequence ${stamp()}`);
+  // sequence settings from a real camera clip; that clip is removed again right away
+  let seq = await project.createSequenceFromMedia(name, [byPath.get(firstVid.path).item]);
+  if (!seq) throw new Error("sequence එක හදන්න බැරි වුණා");
+  const g = seq.guid.toString();
+  const S = async () => (seq = await freshSeq(project, seq, g));
+  for (const kind of ["v", "a"]) {
+    const cnt = kind === "v" ? await (await S()).getVideoTrackCount() : await (await S()).getAudioTrackCount();
+    for (let i = 0; i < cnt; i++) {
+      const items = (await itemsOf(async () => kind === "v" ? (await S()).getVideoTrack(i) : (await S()).getAudioTrack(i))).map((x) => x.it);
+      if (items.length) await retryStale(async () => removeItems(project, await S(), items, kind === "v" ? ppro.Constants.MediaType.VIDEO : ppro.Constants.MediaType.AUDIO));
+    }
+  }
+  // audio-only files first (recorder/mic lanes), then cameras; each lane keeps the audio track it got first
+  const audioLane = new Map();
+  let nextAudio = 0;
+  const order = [...pl.filter((p) => !p.has_video).sort((a, b) => a.audio_track - b.audio_track || a.start - b.start),
+                 ...pl.filter((p) => p.has_video).sort((a, b) => a.video_track - b.video_track || a.start - b.start)];
+  let placed = 0, failed = 0;
+  for (const p of order) {
+    const laneKey = (p.has_video ? "v" : "a") + p.audio_track;
+    if (!audioLane.has(laneKey)) { audioLane.set(laneKey, nextAudio); nextAudio += 1; }
+    const aIdx = audioLane.get(laneKey);
+    const before = await (await S()).getAudioTrackCount().catch(() => 0);
+    try {
+      await retryStale(async () => {
+        const ed = ppro.SequenceEditor.getEditor(await S());
+        transact(project, "AutoWed sync", () => [ed.createOverwriteItemAction(byPath.get(p.path).item, tt(p.start), p.has_video ? p.video_track : 0, aIdx)]);
+      });
+      placed++;
+      // if this clip opened more than one new audio track (multi-channel camera), move later lanes up
+      const after = await (await S()).getAudioTrackCount().catch(() => before);
+      if (after - before > 1 && aIdx + 1 >= nextAudio) nextAudio = aIdx + (after - before);
+    } catch (e) {
+      failed++;
+      log(`Sync: "${p.name}" timeline එකට දාන්න බැරි වුණා: ${e && e.message || e}`, "warn");
+    }
+    $("syncinfo").textContent = `Timeline එකට දානවා ${placed + failed}/${order.length}`;
+  }
+  try { await project.openSequence(await S()); } catch (e) {}
+  const un = pl.filter((p) => p.unsynced);
+  log(`✔ Sync ඉවරයි: "${name}" · files ${placed}${failed ? ` (බැරි වුණා ${failed})` : ""} · master audio: ${res.anchor}`, "ok");
+  for (const p of pl.filter((x) => !x.unsynced && x.confidence < 2)) log(`  ⚠ "${p.name}" sync විශ්වාසය අඩුයි (${p.confidence}) — ඇහෙන් බලන්න`, "warn");
+  if (un.length) log(`  Sync වුණේ නැති files ${un.length}ක් timeline එකේ අගට දැම්මා: ${un.map((p) => p.name).join(", ")}`, "warn");
+  for (const d of res.drift || []) log(`  Clock drift: "${d.unit}" විනාඩි ${d.over_min} කට ${d.drift_ms} ms`, "warn");
+  if (un.length) await addMarkers(project, await S(), un.map((p) => ({ name: "Sync නොවුණු file: " + p.name, start: p.start, dur: p.end - p.start })));
+  $("syncinfo").textContent = `"${name}" · files ${placed}`;
+}
+
+// =====================================================================================
+// 3 · Batch: several ranges / events edited one after another
+// =====================================================================================
+let QUEUE = [];
+function qKey() { return "autowed.queue"; }
+function qSave() { try { localStorage.setItem(qKey(), JSON.stringify(QUEUE)); } catch (e) {} }
+function qLoad() { try { QUEUE = JSON.parse(localStorage.getItem(qKey()) || "[]"); } catch (e) { QUEUE = []; } }
+function qRender() {
+  const box = $("queue");
+  box.innerHTML = "";
+  if (!QUEUE.length) { box.innerHTML = '<div class="mute">ලිස්ට් එක හිස්.</div>'; return; }
+  QUEUE.forEach((q, i) => {
+    const row = document.createElement("div");
+    row.className = "qrow";
+    const st = q.status === "done" ? " ✔" : q.status === "error" ? " ✘" : q.status === "running" ? " …" : "";
+    const sp = document.createElement("span");
+    sp.textContent = `${i + 1}. ${q.seqName} · ${fmt(q.range[0])}→${fmt(q.range[1])}${st}`;
+    const ev = document.createElement("select");
+    for (const o of $("event").options) { const n = document.createElement("option"); n.value = o.value; n.textContent = o.textContent.split("  ·  ")[0]; ev.appendChild(n); }
+    ev.value = q.event;
+    ev.onchange = () => { q.event = ev.value; qSave(); };
+    const kd = document.createElement("select");
+    for (const [v, t] of [["stacked", "Manual"], ["multicam", "Multicam"]]) { const n = document.createElement("option"); n.value = v; n.textContent = t; kd.appendChild(n); }
+    kd.value = q.kind;
+    kd.onchange = () => { q.kind = kd.value; qSave(); };
+    const rm = document.createElement("button");
+    rm.textContent = "✕";
+    rm.onclick = () => { QUEUE.splice(i, 1); qSave(); qRender(); };
+    row.append(sp, ev, kd, rm);
+    box.appendChild(row);
+  });
+}
+
+async function qAddInOut() {
+  const project = await ppro.Project.getActiveProject();
+  const seq = project && (await project.getActiveSequence());
+  if (!seq) { log("Active sequence එකක් නැහැ.", "bad"); return; }
+  const inT = (await seq.getInPoint()).seconds, outT = (await seq.getOutPoint()).seconds, endT = (await seq.getEndTime()).seconds;
+  if (!(outT > inT + 0.5) || (inT < 0.01 && Math.abs(outT - endT) < 0.05)) { log("ලිස්ට් එකට දාන්න කලින් In (I) සහ Out (O) දාන්න.", "bad"); return; }
+  QUEUE.push({ seqGuid: seq.guid.toString(), seqName: seq.name, range: [inT, outT], event: $("event").value || "auto", kind: $("etype").value, status: "" });
+  qSave(); qRender();
+  log(`ලිස්ට් එකට දැම්මා: ${seq.name} · ${fmt(inT)} → ${fmt(outT)} · ${eventName($("event").value)}`, "ok");
+}
+
+async function qRun() {
+  if (busy) return;
+  const todo = QUEUE.filter((q) => q.status !== "done");
+  if (!todo.length) { log("ලිස්ට් එකේ edit කරන්න දෙයක් නැහැ.", "warn"); return; }
+  busy = true; $("go").disabled = true; $("qrun").disabled = true;
+  try {
+    let n = 0;
+    for (const q of todo) {
+      n++;
+      log(`── Batch ${n}/${todo.length}: ${q.seqName} · ${fmt(q.range[0])} → ${fmt(q.range[1])} · ${eventName(q.event)}`, "ok");
+      q.status = "running"; qRender();
+      let ok = false;
+      try {
+        const project = await ppro.Project.getActiveProject();      // fresh: multicam reopens the project
+        const seq = (await project.getSequences()).find((x) => x.guid.toString() === q.seqGuid)
+                 || (await project.getSequences()).find((x) => x.name === q.seqName);
+        if (!seq) throw new Error("sequence එක හමු වුණේ නැහැ: " + q.seqName);
+        await project.openSequence(seq);
+        await sleep(400);
+        ok = await runAutoEdit({ range: q.range, event: q.event, kind: q.kind });
+      } catch (e) { log("Batch: " + (e && e.message || e), "bad"); }
+      q.status = ok ? "done" : "error"; qSave(); qRender();
+    }
+    log("✔ Batch ලිස්ට් එක ඉවරයි.", "ok");
+  } finally { busy = false; $("go").disabled = false; $("qrun").disabled = false; }
+}
+
+// =====================================================================================
+// Events: speech / chanting / music / drums blocks -> markers (+ batch list)
+// =====================================================================================
+async function findEvents() {
+  if (busy) return;
+  busy = true; $("evfind").disabled = true;
+  try {
+    const sd = await readSequence();
+    if (!sd) return;
+    if (!(await ping())) { log("Engine එකට සම්බන්ධ වෙන්න බැහැ.", "bad"); return; }
+    const range = sd.hasInOut ? [sd.inT, sd.outT] : [0, sd.endT];
+    log(`Events හොයනවා: ${sd.name} · ${fmt(range[0])} → ${fmt(range[1])} (audio එකෙන්)…`);
+    const body = { project: { name: sd.name, fps: sd.fps, master_cam: 0, range,
+                              cameras: sd.cams.map((c) => ({ name: c.name, clips: c.clips })), audio_tracks: sd.audio }, range };
+    const job = (await call("POST", "/api/events", body)).job;
+    let res = null;
+    while (true) {
+      await sleep(1000);
+      let j;
+      try { j = await call("GET", "/api/job/" + job); } catch (e) { continue; }
+      showProgress("audio", j.progress || 0, null);
+      if (j.status === "error") { for (const l of j.log) log(l, l.startsWith("ERROR") ? "bad" : "mute"); return; }
+      if (j.status === "done") { res = j.result; break; }
+    }
+    const project = await ppro.Project.getActiveProject();
+    const evs = res.events.filter((e) => e.event);
+    const n = await addMarkers(project, sd.seq, res.events.filter((e) => e.kind !== "quiet").map((e) => ({
+      name: `AutoWed · ${e.label}`, start: e.start, dur: e.end - e.start,
+      comment: `${e.kind} · ${eventName(e.event || "")} ? · විශ්වාසය ${Math.round(e.confidence * 100)}%` })));
+    for (const e of res.events) log(`  ${fmt(e.start)} → ${fmt(e.end)}  ${e.label}${e.event ? " → " + eventName(e.event) : ""}`, "mute");
+    for (const e of evs) QUEUE.push({ seqGuid: sd.guid, seqName: sd.name, range: [e.start, e.end], event: e.event, kind: $("etype").value, status: "" });
+    qSave(); qRender();
+    showProgress("done", 1, null);
+    log(`✔ Events ${res.events.length}ක් · markers ${n} · batch ලිස්ට් එකට ${evs.length}ක් දැම්මා. Event එක වැරදි නම් ලිස්ට් එකේ වෙනස් කරන්න.`, "ok");
+  } catch (e) { log("Events: " + (e && e.message || e), "bad"); }
+  finally { busy = false; $("evfind").disabled = false; }
+}
+
+// =====================================================================================
+// Stabilize: Warp Stabilizer on the chosen pieces that are still shaky
+// =====================================================================================
+const NO_STAB_EVENTS = new Set(["dance_floor", "surprise_dance"]);   // handheld moving to the music is wanted
+async function stabilizePieces(project, sd, cams, result, kind) {
+  const mode = ($("stab") || {}).value || "off";
+  if (mode === "off" || NO_STAB_EVENTS.has(result.event)) return;
+  const thr = numOrNull("stab_thr") || 1.5;
+  const shaky = (result.segments || []).filter((s) => (s.shake || 0) >= thr && s.end - s.start >= 1.0);
+  if (!shaky.length) { log("Stabilize: shake වැඩි කෑලි නැහැ.", "mute"); return; }
+  const canWarp = mode === "warp" && kind === "stacked" && ppro.VideoFilterFactory && typeof ppro.VideoFilterFactory.createComponent === "function";
+  if (!canWarp) {
+    const n = await addMarkers(project, sd.seq, shaky.map((s) => ({ name: `Shaky (Cam ${s.cam + 1})`, start: s.start, dur: s.end - s.start, comment: `shake ${s.shake}` })));
+    log(`Stabilize: shake වැඩි කෑලි ${shaky.length}කට markers ${n}ක් දැම්මා${mode === "warp" && kind !== "stacked" ? " (Multicam clips වලට Warp Stabilizer කෙලින්ම දාන්න බැහැ)" : ""}.`, "ok");
+    return;
+  }
+  let done = 0, failed = 0;
+  for (const s of shaky) {
+    const c = cams[s.cam];
+    if (!c) continue;
+    try {
+      await retryStale(async () => {
+        const seq = await freshSeq(project, sd.seq, sd.guid);
+        const hit = (await itemsOf(await seq.getVideoTrack(c.track))).find((x) => Math.abs(x.a - s.start) < 0.05 && Math.abs(x.b - s.end) < 0.05);
+        if (!hit) throw new Error("piece not found");
+        const chain = await hit.it.getComponentChain();
+        const comp = await ppro.VideoFilterFactory.createComponent("AE.ADBE SubspaceStabilizer");
+        transact(project, "AutoWed stabilize", () => [chain.createAppendComponentAction(comp)]);
+      });
+      done++;
+    } catch (e) {
+      failed++;
+      if (failed === 1) log("Stabilize: " + (e && e.message || e), "warn");
+    }
+  }
+  log(`Stabilize: Warp Stabilizer කෑලි ${done}කට දැම්මා${failed ? `, ${failed}කට බැරි වුණා` : ""}. Premiere background එකේ analyze කරනවා.`, done ? "ok" : "warn");
+  if (failed) await addMarkers(project, sd.seq, shaky.slice(0, 50).map((s) => ({ name: `Shaky (Cam ${s.cam + 1})`, start: s.start, dur: s.end - s.start })));
+}
+
+$("sync").onclick = runSync;
+$("qadd").onclick = qAddInOut;
+$("qrun").onclick = qRun;
+$("qclear").onclick = () => { QUEUE = []; qSave(); qRender(); };
+$("evfind").onclick = findEvents;
+qLoad(); qRender();

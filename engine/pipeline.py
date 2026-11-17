@@ -145,6 +145,15 @@ def run(project: dict, event: str = "auto", out_dir: str = "out", overrides: dic
     bs = block_scores(scores, times, bounds)
     _, dead = to_segments(np.argmax(bs, axis=0), bounds, bs, preset)
     final_segs = apply_dead_cuts(committed, dead) if remove_dead else committed
+    # how shaky each chosen piece is (same measure the camera choice used; dance events forgive
+    # movement that follows the music) -> the panel can stabilize the shaky ones
+    for sg in final_segs:
+        try:
+            sh = _parts[sg["cam"]].get("shake") if sg["cam"] < len(_parts) else None
+            m = (times >= sg["start"]) & (times < sg["end"])
+            sg["shake"] = round(float(np.nanmean(sh[m])), 3) if sh is not None and m.any() else 0.0
+        except Exception:  # noqa: BLE001
+            sg["shake"] = 0.0
 
     total = sum(s["end"] - s["start"] for s in final_segs) or 1
     share = {project["cameras"][c]["name"]: round(100 * sum(s["end"] - s["start"] for s in final_segs

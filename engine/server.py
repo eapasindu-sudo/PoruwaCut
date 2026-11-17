@@ -83,6 +83,58 @@ def _default_out(project, mode):
     return os.path.join(os.path.dirname(first), "PoruwaCut_out", mode)
 
 
+def _run_sync(job, body):
+    """Sync tab: line up any set of camera / recorder / mic files by audio."""
+    import time
+    from . import msync
+    log = _logger(job)
+    t0 = time.time()
+    try:
+        with LOCK:
+            job["status"] = "running"
+
+            def prog(frac, msg):
+                job["stage"], job["progress"], job["stage_progress"] = "sync", round(frac, 4), round(frac, 4)
+                job["elapsed"] = round(time.time() - t0, 1)
+                job["stage_text"] = msg
+            res = msync.place_files(body["files"], cache_dir=os.path.join(DATA_DIR, "cache", "sync"),
+                                    workers=int(body.get("workers", 4)), log=log, progress=prog)
+            job["result"] = res
+            job["progress"] = 1.0
+            job["status"] = "done"
+    except Exception as e:  # noqa: BLE001
+        job["status"] = "error"
+        job["log"].append(f"ERROR: {e}")
+        job["log"].append(traceback.format_exc())
+        print(traceback.format_exc(), flush=True)
+
+
+def _run_events(job, body):
+    """Find speech / chanting / music / drums blocks in a timeline range (event markers)."""
+    import time
+    from . import events_detect
+    log = _logger(job)
+    t0 = time.time()
+    try:
+        with LOCK:
+            job["status"] = "running"
+            p = proj.normalise(body["project"])
+            a, b = body.get("range") or p.get("range") or [0, 0]
+
+            def prog(frac, msg):
+                job["stage"], job["progress"], job["stage_progress"] = "events", round(frac, 4), round(frac, 4)
+                job["elapsed"] = round(time.time() - t0, 1)
+                job["stage_text"] = msg
+            job["result"] = {"events": events_detect.detect_events(p, float(a), float(b), progress=prog, log=log)}
+            job["progress"] = 1.0
+            job["status"] = "done"
+    except Exception as e:  # noqa: BLE001
+        job["status"] = "error"
+        job["log"].append(f"ERROR: {e}")
+        job["log"].append(traceback.format_exc())
+        print(traceback.format_exc(), flush=True)
+
+
 def _run_edit(job, body):
     log = _logger(job)
     try:
@@ -254,6 +306,14 @@ def api(method: str, path: str, body: dict | None = None):
         if path == "/api/quit":
             threading.Timer(0.5, lambda: os._exit(0)).start()
             return 200, {"ok": True}
+        if path == "/api/events":
+            job = _new_job("events")
+            threading.Thread(target=_run_events, args=(job, body), daemon=True).start()
+            return 200, {"job": job["id"]}
+        if path == "/api/sync":
+            job = _new_job("sync")
+            threading.Thread(target=_run_sync, args=(job, body), daemon=True).start()
+            return 200, {"job": job["id"]}
         if path == "/api/edit":
             job = _new_job("edit")
             threading.Thread(target=_run_edit, args=(job, body), daemon=True).start()
