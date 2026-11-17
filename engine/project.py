@@ -40,21 +40,28 @@ def save(p: dict, path: str):
         json.dump(p, f, indent=2, ensure_ascii=False)
 
 
+def _fill(cl: dict) -> bool:
+    """Complete a clip entry; False if its file can't be read (title, graphic, offline media)."""
+    try:
+        if "duration" not in cl:
+            cl["duration"] = probe(cl["path"]).duration
+    except Exception as e:  # noqa: BLE001
+        print(f"skip clip {cl.get('path')!r}: {e}", flush=True)
+        return False
+    cl.setdefault("src_in", 0.0)
+    cl.setdefault("tl_start", cl["offset"] + cl["src_in"])
+    cl.setdefault("tl_end", cl["offset"] + cl["duration"])
+    return True
+
+
 def normalise(p: dict) -> dict:
     for cam in p["cameras"]:
-        for cl in cam["clips"]:
-            if "duration" not in cl:
-                cl["duration"] = probe(cl["path"]).duration
-            cl.setdefault("src_in", 0.0)
-            cl.setdefault("tl_start", cl["offset"] + cl["src_in"])
-            cl.setdefault("tl_end", cl["offset"] + cl["duration"])
-    for trk in p.get("audio_tracks") or []:
-        for cl in trk:
-            if "duration" not in cl:
-                cl["duration"] = probe(cl["path"]).duration
-            cl.setdefault("src_in", 0.0)
-            cl.setdefault("tl_start", cl["offset"] + cl["src_in"])
-            cl.setdefault("tl_end", cl["offset"] + cl["duration"])
+        cam["clips"] = [cl for cl in cam["clips"] if _fill(cl)]
+    p["cameras"] = [c for c in p["cameras"] if c["clips"]]
+    if not p["cameras"]:
+        raise ValueError("කියවන්න පුළුවන් camera clips එකක්වත් නැහැ")
+    if p.get("audio_tracks"):
+        p["audio_tracks"] = [[cl for cl in trk if _fill(cl)] for trk in p["audio_tracks"]]
     p.setdefault("master_cam", 0)
     if not p.get("fps"):
         first = p["cameras"][p["master_cam"]]["clips"][0]["path"]

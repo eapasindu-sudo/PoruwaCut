@@ -207,6 +207,8 @@ async function readItem(item) {
     else if (await clip.isSequence()) why = "nested sequence";
     else path = await clip.getMediaFilePath();
   } catch (e) { why = String(e); }
+  // titles, graphics, mattes and synthetic clips have no real file (Premiere gives an id or "")
+  if (path && !/[\\/]/.test(path)) { why = "file එකක් නෙවෙයි (title / graphic)"; path = ""; }
   return { start, end, srcIn, speed, path, why, name: await item.getName() };
 }
 
