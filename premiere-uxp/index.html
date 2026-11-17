@@ -3,7 +3,9 @@
 <head>
 <meta charset="utf-8">
 <style>
-  body { background:#232323; color:#e6e6e6; font-family: "Iskoola Pota","Nirmala UI","Segoe UI",sans-serif; font-size:12px; margin:0; padding:10px 10px 4px; }
+  html, body { height:100%; overflow:hidden; }
+  #wrap { height:100vh; overflow-y:auto; overflow-x:hidden; padding:10px 12px 4px 10px; box-sizing:border-box; }
+  body { background:#232323; color:#e6e6e6; font-family: "Iskoola Pota","Nirmala UI","Segoe UI",sans-serif; font-size:12px; margin:0; padding:0; }
   h1 { font-size:15px; margin:0; } h1 span { color:#d4a24c; }
   .mute { color:#9a9a9a; }
   .ok { color:#5fb37a; } .bad { color:#e0645a; } .warn { color:#d4a24c; }
@@ -46,6 +48,7 @@
 </style>
 </head>
 <body>
+<div id="wrap">
   <div class="top"><h1>Auto<span>Wed</span></h1><span id="eng" class="mute">engine…</span><button id="lang" title="සිංහල / English">EN</button></div>
 
   <div id="upd"><b id="updtxt"></b><div id="updnotes" class="mute"></div>
@@ -135,6 +138,7 @@
   <div id="log" style="margin-top:8px"></div>
 
   <div id="foot"><span class="mute" style="flex:1">Powered by <b style="color:#d4a24c">Endora</b></span><span class="mute" id="ver"></span><button id="dbg" title="Claude MCP debug bridge">Claude: OFF</button><button id="chk" data-i18n="chk_btn">Check update</button></div>
+</div>
   <script src="main.js"></script>
 </body>
 </html>
