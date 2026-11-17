@@ -353,19 +353,42 @@ async function setInAdaptive(project, it, want) {
   return false;
 }
 
+// Premiere versions differ in what a trim action does to the other values (26.5: setting the
+// in-point trims the head and moves the start; setting the start moves only the start). So we try
+// the orders, read every value back, and remember the order that worked on this machine.
+const FIX_ORDERS = [["in", "start", "end"], ["start", "end", "in"], ["end", "in", "start"]];
+let fixOrder = null;
+
+async function applyField(project, it, f, want) {
+  if (f === "in") return setInAdaptive(project, it, want.inp);
+  if (f === "start") transact(project, "AutoWed cut", () => [it.createSetStartAction(tt(want.a))]);
+  if (f === "end") transact(project, "AutoWed cut", () => [it.createSetEndAction(tt(want.b))]);
+}
+const fieldOk = (c, want, f) => f === "in" ? Math.abs(c.inp - want.inp) <= 0.004
+  : f === "start" ? Math.abs(c.a - want.a) <= 0.002 : Math.abs(c.b - want.b) <= 0.002;
+const allOk = (c, want) => fieldOk(c, want, "in") && fieldOk(c, want, "start") && fieldOk(c, want, "end");
+
 async function fixItem(project, it, want) {
-  for (let round = 0; round < 4; round++) {
-    let c = await readTI(it);
-    if (Math.abs(c.a - want.a) > 0.002) transact(project, "AutoWed cut", () => [it.createSetStartAction(tt(want.a))]);
-    c = await readTI(it);
-    if (Math.abs(c.b - want.b) > 0.002) transact(project, "AutoWed cut", () => [it.createSetEndAction(tt(want.b))]);
-    c = await readTI(it);
-    if (Math.abs(c.inp - want.inp) > 0.002) await setInAdaptive(project, it, want.inp);
-    c = await readTI(it);
-    if (Math.abs(c.a - want.a) <= 0.002 && Math.abs(c.b - want.b) <= 0.002 && Math.abs(c.inp - want.inp) <= 0.004) return c;
+  const orders = fixOrder ? [fixOrder, ...FIX_ORDERS.filter((o) => o !== fixOrder)] : FIX_ORDERS;
+  let c = await readTI(it);
+  if (allOk(c, want)) return c;
+  for (const order of orders) {
+    for (let round = 0; round < 2; round++) {
+      for (const f of order) {
+        c = await readTI(it);
+        if (!fieldOk(c, want, f)) await applyField(project, it, f, want);
+      }
+      c = await readTI(it);
+      if (allOk(c, want)) { fixOrder = order; return c; }
+    }
   }
-  const c = await readTI(it);
+  c = await readTI(it);
   throw new Error(`sync check failed at ${fmt(want.a)}: start ${c.a.toFixed(3)}/${want.a.toFixed(3)} end ${c.b.toFixed(3)}/${want.b.toFixed(3)} in ${c.inp.toFixed(3)}/${want.inp.toFixed(3)}`);
+}
+
+async function removeItems(project, seq, items, mediaType) {
+  const sel = await selectionOf(items);
+  transact(project, "AutoWed undo cut", () => [ppro.SequenceEditor.getEditor(seq).createRemoveItemsAction(sel, false, mediaType)]);
 }
 
 async function emulatedRazor(project, seq, vIndex, t) {
@@ -378,18 +401,33 @@ async function emulatedRazor(project, seq, vIndex, t) {
   const rate = o.out > o.inp && b > a ? (o.out - o.inp) / (b - a) : 1;   // source seconds per timeline second
   const srcAt = (time) => o.inp + (time - a) * rate;
   const left = t - a, right = b - t;
-  if (left >= right) {
-    await fixItem(project, it, { a: t, b, inp: srcAt(t) });               // original keeps [t, b]
-    transact(project, "AutoWed cut", () => [editor.createCloneTrackItemAction(it, tt(-left), 0, 0, true, false)]);
-    const c = (await itemsOf(track)).find((x) => Math.abs(x.a - a) < EPS && x.it !== it);
-    if (!c) throw new Error(`clone not found at ${fmt(a)}`);
-    await fixItem(project, c.it, { a, b: t, inp: o.inp });                // clone fills [a, t]
-  } else {
-    await fixItem(project, it, { a, b: t, inp: o.inp });                  // original keeps [a, t]
-    transact(project, "AutoWed cut", () => [editor.createCloneTrackItemAction(it, tt(left), 0, 0, true, false)]);
-    const c = (await itemsOf(track)).find((x) => Math.abs(x.a - t) < EPS && x.it !== it);
-    if (!c) throw new Error(`clone not found at ${fmt(t)}`);
-    await fixItem(project, c.it, { a: t, b, inp: srcAt(t) });             // clone fills [t, b]
+  let clone = null;
+  try {
+    if (left >= right) {
+      await fixItem(project, it, { a: t, b, inp: srcAt(t) });               // original keeps [t, b]
+      transact(project, "AutoWed cut", () => [editor.createCloneTrackItemAction(it, tt(-left), 0, 0, true, false)]);
+      const c = (await itemsOf(track)).find((x) => Math.abs(x.a - a) < EPS && x.it !== it);
+      if (!c) throw new Error(`clone not found at ${fmt(a)}`);
+      clone = c.it;
+      await fixItem(project, clone, { a, b: t, inp: o.inp });               // clone fills [a, t]
+    } else {
+      await fixItem(project, it, { a, b: t, inp: o.inp });                  // original keeps [a, t]
+      transact(project, "AutoWed cut", () => [editor.createCloneTrackItemAction(it, tt(left), 0, 0, true, false)]);
+      const c = (await itemsOf(track)).find((x) => Math.abs(x.a - t) < EPS && x.it !== it);
+      if (!c) throw new Error(`clone not found at ${fmt(t)}`);
+      clone = c.it;
+      await fixItem(project, clone, { a: t, b, inp: srcAt(t) });            // clone fills [t, b]
+    }
+  } catch (e) {
+    // put this clip back exactly as it was before the failed cut
+    try {
+      if (clone) await removeItems(project, seq, [clone], ppro.Constants.MediaType.VIDEO);
+      await fixItem(project, it, { a, b, inp: o.inp });
+      log(`Cut ${fmt(t)} ආපස්සට හැරෙව්වා: clip එක කලින් තිබුණු විදිහටම තියෙනවා.`, "warn");
+    } catch (e2) {
+      log(`⚠ Cut ${fmt(t)} ආපස්සට හරවන්න බැරි වුණා (V${vIndex + 1}). Ctrl+Z එකෙන් "AutoWed cut" ආපස්සට ගන්න.`, "bad");
+    }
+    throw e;
   }
   return true;
 }
@@ -621,7 +659,7 @@ async function runAutoEdit() {
         try { await applier.apply(j.segments, j.committed_until || range[0], false); }
         catch (e) {
           log("Timeline cut නැවැත්තුවා: " + (e && e.message || e), "bad");
-          log("Analysis එක දිගටම යනවා. ඉවර වුණාම cuts වෙනත් ක්‍රමයකට දානවා.", "warn");
+          log("Live cuts නැවැත්තුවා. Analysis එක ඉවර වෙනකම් යනවා (strip එකේ ප්‍රතිඵලය බලන්න).", "warn");
           applier = null;
         }
       }
@@ -650,9 +688,12 @@ async function finish(project, kind, sd, nest, nestInfo, applier, cams, result) 
   }
   await addDeadMarkers(project, sd.seq, result);
   if (kind === "stacked") {
-    if (!applier && result.xml) {
-      await project.importFiles([result.xml], true, null, false);
-      log("Timeline එකේ live cut කරන්න බැරි වුණ නිසා edit එක අලුත් sequence එකක් විදිහට import කළා: " + result.xml, "warn");
+    if (!applier) {
+      log("Timeline එකේ cut කරන්න බැරි වුණ නිසා ඔබේ timeline එකට තවත් වෙනස්කම් කළේ නැහැ (අලුත් sequence එකකුත් හැදුවේ නැහැ).", "warn");
+      if (result.xml) log("ඕන නම් මේ edit එක File › Import එකෙන් ගන්න: " + result.xml, "mute");
+      log("Razor test එක ඔබලා ඒකේ screenshot එකක් එවන්න.", "mute");
+      showProgress("done", 1, null);
+      return;
     }
     showProgress("done", 1, null);
     log(`✔ ඉවරයි · cuts ${s.cuts} · සාමාන්‍ය shot ${s.avg_shot}s · angle මාරු කරන්න කෑල්ල select කරලා Shift+E.`, "ok");
