@@ -54,14 +54,32 @@ def _fill(cl: dict) -> bool:
     return True
 
 
+def _in_range(cl: dict, r, pad: float = 5.0) -> bool:
+    """Clips from a Premiere sequence know where they sit; ones outside the In/Out are not read."""
+    if not r or "tl_start" not in cl or "tl_end" not in cl:
+        return True
+    return cl["tl_end"] > r[0] - pad and cl["tl_start"] < r[1] + pad
+
+
+def _fill_all(clips: list) -> list:
+    """ffprobe many clips at once (network / USB drives are slow one by one)."""
+    from concurrent.futures import ThreadPoolExecutor
+    if len(clips) <= 1:
+        return [cl for cl in clips if _fill(cl)]
+    with ThreadPoolExecutor(max_workers=min(8, len(clips))) as ex:
+        ok = list(ex.map(_fill, clips))
+    return [cl for cl, k in zip(clips, ok) if k]
+
+
 def normalise(p: dict) -> dict:
+    r = p.get("range")
     for cam in p["cameras"]:
-        cam["clips"] = [cl for cl in cam["clips"] if _fill(cl)]
+        cam["clips"] = _fill_all([cl for cl in cam["clips"] if _in_range(cl, r)])
     p["cameras"] = [c for c in p["cameras"] if c["clips"]]
     if not p["cameras"]:
         raise ValueError("කියවන්න පුළුවන් camera clips එකක්වත් නැහැ")
     if p.get("audio_tracks"):
-        p["audio_tracks"] = [[cl for cl in trk if _fill(cl)] for trk in p["audio_tracks"]]
+        p["audio_tracks"] = [_fill_all([cl for cl in trk if _in_range(cl, r)]) for trk in p["audio_tracks"]]
     p.setdefault("master_cam", 0)
     if not p.get("fps"):
         first = p["cameras"][p["master_cam"]]["clips"][0]["path"]

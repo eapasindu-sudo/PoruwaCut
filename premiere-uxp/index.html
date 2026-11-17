@@ -77,19 +77,39 @@
   .qrow span { flex:1; } .qrow select { font-size:11px; margin-left:4px; } .qrow button { padding:2px 7px; margin-left:4px; }
   .btnrow button { margin:3px 6px 3px 0; }
   #tlcol.on, #dbg.on { color:#b48cff; border-color:#b48cff; }
+
+  /* UXP draws <button> with its own grey style, so the big controls are plain divs */
+  .rbtn { cursor:pointer; }
+  .ric { display:flex; align-items:center; justify-content:center; }
+  .ric.num { width:22px; height:22px; border-radius:11px; border:1.5px solid #5f6068; font-size:11px; font-weight:700; }
+  .rbtn.on .ric.num { border-color:#b48cff; background:#b48cff; color:#121316; }
+  .ric.gear { width:12px; height:12px; border-radius:8px; border:3px dotted #8d8e96; }
+  .rbtn.on .ric.gear { border-color:#b48cff; }
+  .ric.lines { flex-direction:column; width:16px; height:14px; justify-content:space-between; }
+  .ric.lines i { display:block; width:16px; height:2px; background:#8d8e96; border-radius:1px; }
+  .rbtn.on .ric.lines i { background:#b48cff; }
+  .pill { cursor:pointer; }
+  .seg2 .seg { flex:1; text-align:center; background:#1f2026; border:1px solid #2c2d34; color:#c4c5cc; border-radius:8px; padding:9px; margin-right:8px; cursor:pointer; font-size:12px; }
+  .seg2 .seg:last-child { margin-right:0; }
+  .seg2 .seg.on { background:#26203a; border-color:#b48cff; color:#ffffff; font-weight:600; }
+  #foot .go, #foot .stopbtn, #foot .resetbtn { padding:0; border:none; display:flex; align-items:center; justify-content:center; border-radius:8px; cursor:pointer; font-size:13px; font-weight:700; height:40px; }
+  #foot .go { flex:1; background:#b48cff; color:#121316; margin-right:8px; }
+  #foot .go.dis { background:#2c2d34; color:#6f7078; }
+  #foot .stopbtn { width:80px; background:#a8423a; color:#ffffff; margin-right:8px; }
+  #foot .resetbtn { width:64px; background:#1f2026; border:1px solid #2c2d34 !important; color:#c4c5cc; font-size:11px; }
 </style>
 </head>
 <body>
 <div id="app">
   <nav id="rail">
     <div id="logo">A</div>
-<button class="rbtn" data-tab="sync" title="Sync"><span class="rnum">0</span><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h3l3-7 4 14 3-7h5"></path></svg><span class="rlbl" data-i18n="r_sync">Sync</span></button>
-<button class="rbtn" data-tab="seq" title="Sequence"><span class="rnum">1</span><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"></rect><path d="M3 10h18M8 5v14"></path></svg><span class="rlbl" data-i18n="r_seq">Sequence</span></button>
-<button class="rbtn" data-tab="edit" title="Edit"><span class="rnum">2</span><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><path d="M20 4L8.1 15.9M14.5 14.5L20 20M8.1 8.1L12 12"></path></svg><span class="rlbl" data-i18n="r_edit">Edit</span></button>
-<button class="rbtn" data-tab="batch" title="Batch"><span class="rnum">3</span><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h1M3 12h1M3 18h1"></path></svg><span class="rlbl" data-i18n="r_batch">Batch</span></button>
+<div class="rbtn" data-tab="sync" title="Sync"><span class="ric num">0</span><span class="rlbl" data-i18n="r_sync">Sync</span></div>
+<div class="rbtn" data-tab="seq" title="Sequence"><span class="ric num">1</span><span class="rlbl" data-i18n="r_seq">Sequence</span></div>
+<div class="rbtn" data-tab="edit" title="Edit"><span class="ric num">2</span><span class="rlbl" data-i18n="r_edit">Edit</span></div>
+<div class="rbtn" data-tab="batch" title="Batch"><span class="ric num">3</span><span class="rlbl" data-i18n="r_batch">Batch</span></div>
 <span class="rdiv"></span>
-<button class="rbtn" data-tab="set" title="Settings"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"></path></svg><span class="rlbl" data-i18n="r_set">Settings</span></button>
-<button class="rbtn" data-tab="log" title="Log"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z"></path><path d="M8 9h8M8 13h8M8 17h5"></path></svg><span class="rlbl" data-i18n="r_log">Log</span></button>
+<div class="rbtn" data-tab="set" title="Settings"><span class="ric gear"></span><span class="rlbl" data-i18n="r_set">Settings</span></div>
+<div class="rbtn" data-tab="log" title="Log"><span class="ric lines"><i></i><i></i><i></i></span><span class="rlbl" data-i18n="r_log">Log</span></div>
     <div id="rfoot"><span id="rdot"></span><span id="rver"></span></div>
   </nav>
 
@@ -133,7 +153,7 @@
         <div class="pills" id="evpills"></div>
         <select id="event" style="display:none"></select>
         <span class="lbl" data-i18n="l_etype">EDIT වර්ගය</span>
-        <div class="seg2" id="kindseg"><button data-k="multicam">Multicam</button><button data-k="stacked">Manual cutting</button></div>
+        <div class="seg2" id="kindseg"><div class="seg" data-k="multicam">Multicam</div><div class="seg" data-k="stacked">Manual cutting</div></div>
         <select id="etype" style="display:none"><option value="multicam">Multicamera edit</option><option value="stacked">Manual cutting (stacked)</option></select>
         <div class="hint" id="etypehint"></div>
         <span class="lbl" data-i18n="l_moments">MOMENTS &amp; CHECKS</span>
@@ -181,9 +201,9 @@
     </div>
 
     <div id="foot">
-      <button class="go" id="go" data-i18n="go_btn">Auto Edit ▶</button>
-      <button id="stop" class="stopbtn" style="display:none" data-i18n="stop_btn">■ Stop</button>
-      <button id="reset" title="Panel එක හිරවුණොත්: run වෙන jobs නවත්තලා panel එක මුල් තත්වයට ගේනවා">↺</button>
+      <div class="go" id="go" data-i18n="go_btn">Auto Edit</div>
+      <div id="stop" class="stopbtn" style="display:none" data-i18n="stop_btn">Stop</div>
+      <div id="reset" class="resetbtn" title="Panel එක හිරවුණොත්: run වෙන jobs නවත්තලා panel එක මුල් තත්වයට ගේනවා">Reset</div>
     </div>
   </div>
 </div>

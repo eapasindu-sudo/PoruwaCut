@@ -234,6 +234,9 @@ def __run_edit_impl(job, body):
                 log("Audio sync...")
                 p = proj.from_folders(p["cams"], int(p.get("master", 1)) - 1, p.get("name", "Wedding"), log)
             else:
+                job["stage"] = "read"
+                n = sum(len(c.get("clips", [])) for c in p["cameras"]) + sum(len(t) for t in p.get("audio_tracks") or [])
+                log(f"Timeline clips කියවනවා (In/Out එක ඇතුළේ ඒවා විතරයි, මුළු clips {n})...")
                 p = proj.normalise(p)
             o = body.get("options", {})
             if o.get("start") is not None or o.get("end") is not None:

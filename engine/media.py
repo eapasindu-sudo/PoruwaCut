@@ -47,7 +47,7 @@ class MediaInfo:
         return float(self.fps)
 
 
-@functools.lru_cache(maxsize=512)
+@functools.lru_cache(maxsize=2048)
 def probe(path: str) -> MediaInfo:
     """ffprobe a media file (cached). Audio-only files (e.g. DJI WAV) get width=height=0."""
     out = subprocess.run(

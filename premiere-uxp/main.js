@@ -193,7 +193,8 @@ async function installUpdate() {
 // ---------- progress display ----------
 const STAGES = ["prepare", "audio", "analysis", "finish"];
 const STAGE_TXT = {
-  prepare: "Sequence සූදානම් කරමින්…", queued: "පෝලිමේ…", sync: "Audio sync…",
+  prepare: "Sequence සූදානම් කරමින්…", queued: "Engine එකට යවනවා…", read: "Timeline clips කියවමින්…",
+  faces: "මනාලයා / මනාලිය අඳුරගන්නවා…", qc: "Audio checks…", sync: "Audio sync…",
   audio: "Audio අහමින් (beats / වචන)…", analysis: "කැමරා analyze කරමින්, cuts timeline එකට…",
   cuts: "අවසාන cuts…", xml: "අවසාන cuts…", finish: "ඉවර කරමින්…", done: "ඉවරයි ✔",
 };
@@ -799,7 +800,8 @@ async function autoEdit() {
 // ---------- Stop / Reset ----------
 let CUR_JOB = null, STOPPING = false;
 function showStop(on) {
-  if ($("stop")) $("stop").style.display = on ? "inline-block" : "none";
+  if ($("stop")) $("stop").style.display = on ? "flex" : "none";
+  if ($("go")) $("go").className = "go" + (on ? " dis" : "");
   if (!on) { STOPPING = false; CUR_JOB = null; }
 }
 async function stopRequested(job) {
@@ -1658,11 +1660,11 @@ const I18N = {
   l_sil: [null, "Remove silences"], o_off: [null, "Off"], o_sil_copy: [null, "Cut them in the copy sequence"], l_flash: [null, "White flash (frames)"], l_trim: [null, "Smart trim"],
   o_on: [null, "On (empty head/tail off)"], l_trans: [null, "Event transitions"], o_trans_on: [null, "Cross dissolve at start/end"], l_loud: [null, "Loudness"],
   o_loud_copy: [null, "Set levels in the copy"], l_mic: [null, "Best mic + gap fill"], o_mic_copy: [null, "Best mic in the copy"], l_couple: [null, "Couple recognition"], o_on2: [null, "On"],
-  l_qc: [null, "QC markers"], o_qc_on: [null, "Moments, weak takes, clipping, mic gaps"], go_btn: [null, "Auto Edit ▶"], s3: [null, "3 · Batch (several events)"],
+  l_qc: [null, "QC markers"], o_qc_on: [null, "Moments, weak takes, clipping, mic gaps"], go_btn: [null, "Auto Edit"], s3: [null, "3 · Batch (several events)"],
   s3_help: [null, "Set In/Out, pick the event and add it to the list, or find events to build the list from markers. Then edit them all at once."],
   qadd_btn: [null, "Add In/Out to list +"], evfind_btn: [null, "Find events"], qrun_btn: [null, "Edit the list ▶"], qclear_btn: [null, "Clear"],
   s4: [null, "Studio (presets, learn, stats)"], l_preset: [null, "Preset"], o_pick: [null, "— pick —"], l_pname: [null, "New name"], st_save: [null, "Save preset"],
-  st_refresh: [null, "List"], stop_btn: [null, "■ Stop"], reset_btn: [null, "↺ Reset"], learn_btn: [null, "Learn from my changes"], stats_btn: [null, "Stats"], chk_btn: [null, "Check update"], upd_btn: [null, "Update"],
+  st_refresh: [null, "List"], stop_btn: [null, "Stop"], reset_btn: [null, "Reset"], learn_btn: [null, "Learn from my changes"], stats_btn: [null, "Stats"], chk_btn: [null, "Check update"], upd_btn: [null, "Update"],
 };
 let LANG = "si";
 try { LANG = localStorage.getItem("autowed.lang") || "si"; } catch (e) {}
@@ -1710,7 +1712,7 @@ function renderPills() {
   box.innerHTML = "";
   const sel = $("event");
   for (const o of sel.options) {
-    const b = document.createElement("button");
+    const b = document.createElement("div");
     b.className = "pill" + (o.value === sel.value ? " on" : "");
     b.textContent = o.textContent.split("  ·  ")[0];
     b.onclick = () => { sel.value = o.value; try { localStorage.setItem("autowed.event", o.value); } catch (e) {} renderPills(); };
@@ -1720,10 +1722,10 @@ function renderPills() {
 function renderKind() {
   const et = $("etype");
   if (et.selectedIndex < 0) et.value = "multicam";
-  for (const b of document.querySelectorAll("#kindseg button")) b.className = b.getAttribute("data-k") === et.value ? "on" : "";
+  for (const b of document.querySelectorAll("#kindseg .seg")) b.className = "seg" + (b.getAttribute("data-k") === et.value ? " on" : "");
   if ($("etypehint")) $("etypehint").textContent = HINTS[et.value] || "";
 }
-for (const b of document.querySelectorAll("#kindseg button")) b.onclick = () => {
+for (const b of document.querySelectorAll("#kindseg .seg")) b.onclick = () => {
   $("etype").value = b.getAttribute("data-k");
   try { localStorage.setItem("autowed.kind", $("etype").value); } catch (e) {}
   renderKind();
