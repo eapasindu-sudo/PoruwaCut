@@ -28,7 +28,7 @@ from .paths import WEB_INDEX as WEB, LOG_FILE, DATA_DIR
 IPC_DIR = os.path.join(DATA_DIR, "ipc")
 from . import updater
 JOBS: dict[str, dict] = {}
-LOCK = threading.Lock()  # one heavy job at a time (GPU / disk friendly)
+LOCK = threading.RLock()  # one heavy job at a time (GPU / disk friendly)
 
 
 def _new_job(kind):
@@ -81,6 +81,25 @@ def _on_segments(job):
 def _default_out(project, mode):
     first = project["cameras"][project["master_cam"]]["clips"][0]["path"]
     return os.path.join(os.path.dirname(first), "PoruwaCut_out", mode)
+
+
+def _guarded(job, body, impl):
+    """Run a job; Stop ends it cleanly ("cancelled") instead of as an error."""
+    from .media import STOP, Cancelled
+    job["cancel"] = False
+    try:
+        with LOCK:
+            STOP.clear()
+            if job.get("cancel"):
+                raise Cancelled()
+            impl(job, body)
+    except Cancelled:
+        job["status"] = "cancelled"
+        job["log"].append("නැවැත්තුවා (Stop).")
+    finally:
+        STOP.clear()
+    if job.get("status") == "error" and any("Cancelled" in l for l in job["log"][-3:]):
+        job["status"] = "cancelled"
 
 
 def _json_file(name):
@@ -141,6 +160,10 @@ def _stats_summary():
 
 
 def _run_sync(job, body):
+    return _guarded(job, body, __run_sync_impl)
+
+
+def __run_sync_impl(job, body):
     """Sync tab: line up any set of camera / recorder / mic files by audio."""
     import time
     from . import msync
@@ -167,6 +190,10 @@ def _run_sync(job, body):
 
 
 def _run_events(job, body):
+    return _guarded(job, body, __run_events_impl)
+
+
+def __run_events_impl(job, body):
     """Find speech / chanting / music / drums blocks in a timeline range (event markers)."""
     import time
     from . import events_detect
@@ -193,6 +220,10 @@ def _run_events(job, body):
 
 
 def _run_edit(job, body):
+    return _guarded(job, body, __run_edit_impl)
+
+
+def __run_edit_impl(job, body):
     log = _logger(job)
     try:
         with LOCK:
@@ -317,6 +348,8 @@ def api(method: str, path: str, body: dict | None = None):
             return 200, dict(updater.STATE)
         if path.startswith("/api/update"):
             return 200, updater.check(force="force" in path)
+        if path == "/api/jobs":
+            return 200, {"jobs": [{k: j.get(k) for k in ("id", "kind", "status", "progress", "stage")} for j in JOBS.values()]}
         if path.startswith("/api/job/"):
             job = JOBS.get(path.rsplit("/", 1)[-1])
             if not job:
@@ -389,6 +422,30 @@ def api(method: str, path: str, body: dict | None = None):
         if path == "/api/quit":
             threading.Timer(0.5, lambda: os._exit(0)).start()
             return 200, {"ok": True}
+        if path.startswith("/api/job/") and path.endswith("/cancel"):
+            from .media import STOP
+            job = JOBS.get(path.split("/")[3])
+            if not job:
+                return 404, {"error": "no such job"}
+            job["cancel"] = True
+            if job.get("status") in ("running",):
+                STOP.set()
+            elif job.get("status") == "queued":
+                job["status"] = "cancelled"
+            return 200, {"ok": True}
+        if path == "/api/reset":
+            # Stop everything that runs or waits
+            from .media import STOP
+            n = 0
+            for j in JOBS.values():
+                if j.get("status") in ("running", "queued"):
+                    j["cancel"] = True
+                    n += 1
+                    if j["status"] == "running":
+                        STOP.set()
+                    else:
+                        j["status"] = "cancelled"
+            return 200, {"ok": True, "stopped": n}
         if path == "/api/learn":
             # {"event", "user_avg_shot", "auto_avg_shot"}: move the shot length toward the editor's taste
             ev = body.get("event") or "auto"

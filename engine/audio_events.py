@@ -15,10 +15,32 @@ from .media import extract_audio
 ENV_RATE = 100  # Hz
 
 
+def _audio_only(path: str) -> bool:
+    from .media import probe
+    try:
+        return probe(path).width == 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def recorder_tracks(tracks: list, t0: float, t1: float, keep_index: bool = False) -> list:
+    """When the range has recorder / mic audio (WAV etc.), leave out the camera-audio tracks: reading a
+    camera's sound out of a 4K MP4 means reading all its video data too (gigabytes from the drive)."""
+    def in_range(trk):
+        return [cl for cl in trk if min(t1, cl["tl_end"]) - max(t0, cl["tl_start"]) >= 0.5]
+    rec = [any(_audio_only(cl["path"]) for cl in in_range(trk)) for trk in tracks]
+    if not any(rec):
+        return tracks
+    if keep_index:
+        return [trk if r else [] for trk, r in zip(tracks, rec)]
+    return [trk for trk, r in zip(tracks, rec) if r]
+
+
 def sequence_audio(project: dict, t0: float, t1: float, rate: int, progress=None) -> np.ndarray:
     """Sum of every audio clip in the sequence (or the cameras' own audio when none given)."""
     buf = np.zeros(int((t1 - t0) * rate) + 1, np.float32)
     tracks = project.get("audio_tracks") or []
+    tracks = recorder_tracks(tracks, t0, t1)
     if not tracks:
         tracks = [c["clips"] for c in project["cameras"]]
     used = 0
@@ -30,6 +52,9 @@ def sequence_audio(project: dict, t0: float, t1: float, rate: int, progress=None
             if b - a < 0.5:
                 continue
             done += 1
+            from .media import STOP, Cancelled
+            if STOP.is_set():
+                raise Cancelled()
             if progress:
                 progress(min(1.0, (done - 0.5) / max(1, len(todo))))
             x = extract_audio(cl["path"], rate, start=a - cl["offset"], duration=b - a)

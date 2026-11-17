@@ -188,7 +188,8 @@ def run_qc(project: dict, t0: float, t1: float, event: str, mix: np.ndarray, dea
            want_silence: bool, want_trim: bool) -> dict:
     out: dict = {}
     target = TARGET_LUFS.get(event, DEFAULT_TARGET)
-    tracks = project.get("audio_tracks") or []
+    from .audio_events import recorder_tracks
+    tracks = recorder_tracks(project.get("audio_tracks") or [], t0, t1, keep_index=True)
     raw = [track_audio(t, t0, t1) if t else np.zeros(int((t1 - t0) * RATE) + 1, np.float32) for t in tracks]
     names = [f"A{i + 1}" for i in range(len(tracks))]
     total = np.sum([r[: min(len(x) for x in raw)] for r in raw], axis=0) if raw else mix

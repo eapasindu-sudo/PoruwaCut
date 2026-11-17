@@ -124,7 +124,11 @@ def run(project: dict, event: str = "auto", out_dir: str = "out", overrides: dic
               "analysis": (0.14 if want_couple else 0.08, 0.96), "qc": (0.96, 0.98),
               "cuts": (0.98, 0.99), "xml": (0.99, 1.0)}
 
+    from .media import STOP, Cancelled
+
     def prog(stage, f):
+        if STOP.is_set():
+            raise Cancelled()
         if progress:
             a, b = stages[stage]
             progress(stage, a + (b - a) * f, f)
@@ -267,8 +271,8 @@ def run(project: dict, event: str = "auto", out_dir: str = "out", overrides: dic
             sg["shake"] = 0.0
 
     total = sum(s["end"] - s["start"] for s in final_segs) or 1
-    share = {project["cameras"][c]["name"]: round(100 * sum(s["end"] - s["start"] for s in final_segs
-                                                          if s["cam"] == c) / total, 1) for c in range(C)}
+    share = {project["cameras"][c]["name"]: round(100.0 * float(sum(s["end"] - s["start"] for s in final_segs
+                                                                if s["cam"] == c)) / float(total), 1) for c in range(C)}
     # ---- checks: loudness, best mic, drop-outs, clipping, silences, moments, weak takes ------------
     prog("qc", 0.0)
     qc = {}

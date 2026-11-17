@@ -27,7 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 from scipy import signal
 
-from .media import FFMPEG, NOWIN, extract_audio, probe
+from .media import FFMPEG, NOWIN, STOP, Cancelled, extract_audio, probe
 
 RATE = 4000          # Hz, audio used for the envelope
 ENV_RATE = 100       # Hz, envelope rate (10 ms)
@@ -69,6 +69,9 @@ def envelope(path: str, cache_dir: str | None = None) -> np.ndarray:
     parts, carry = [], np.zeros(0, np.float32)
     block = RATE * 60 * 4
     while True:
+        if STOP.is_set():
+            proc.kill()
+            raise Cancelled()
         raw = proc.stdout.read(block)
         if not raw:
             break

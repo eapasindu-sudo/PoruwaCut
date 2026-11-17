@@ -42,6 +42,7 @@
   #tlcol.on { color:#d4a24c; }
   #dbg { margin-right:6px; }
   #dbg.on { color:#d4a24c; }
+  .stopbtn { background:#a8423a; color:#fff; border:none; font-weight:bold; padding:8px 14px; }
   #lang { margin-left:auto; padding:2px 8px; font-size:11px; }
   details.sec > summary { font-size:11px; color:#9a9a9a; text-transform:uppercase; letter-spacing:1px; cursor:pointer; }
   .btnrow button { margin:3px 3px 0 0; }
@@ -108,7 +109,12 @@
         <option value="on" data-i18n="o_qc_on">Moments, weak takes, clipping, mic gaps</option><option value="off" data-i18n="o_off">එපා</option></select></div>
   </details>
 
-  <button class="go" id="go" data-i18n="go_btn">Auto Edit ▶</button>
+  <div style="display:flex; align-items:center; gap:6px">
+    <button class="go" id="go" data-i18n="go_btn">Auto Edit ▶</button>
+    <button id="stop" class="stopbtn" style="display:none" data-i18n="stop_btn">■ Stop</button>
+    <span style="flex:1"></span>
+    <button id="reset" data-i18n="reset_btn" title="Panel එක හිරවුණොත්: run වෙන jobs නවත්තලා panel එක මුල් තත්වයට ගේනවා">↺ Reset</button>
+  </div>
 
   <div class="sec" style="margin-top:8px">
     <b data-i18n="s3">3 · Batch (events කිහිපයක් එකට)</b>

@@ -14,6 +14,15 @@ from .paths import find_tool
 
 FFMPEG = find_tool("ffmpeg")
 FFPROBE = find_tool("ffprobe")
+
+import threading as _threading
+
+# set by the engine when the editor presses Stop: running decodes end at the next frame
+STOP = _threading.Event()
+
+
+class Cancelled(BaseException):
+    """The editor pressed Stop."""
 # never flash console windows from the (windowless) engine on Windows
 NOWIN = {"creationflags": 0x08000000} if os.name == "nt" else {}
 
@@ -124,6 +133,9 @@ def iter_frames(path: str, start: float, duration: float, fps: float, width: int
         n = 0
         try:
             while True:
+                if STOP.is_set():
+                    proc.kill()
+                    raise Cancelled()
                 buf = proc.stdout.read(frame_bytes)
                 if len(buf) < frame_bytes:
                     break

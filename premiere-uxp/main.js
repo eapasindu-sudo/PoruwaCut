@@ -719,10 +719,46 @@ function eventName(id) {
 // ---------- the main flow ----------
 async function autoEdit() {
   if (busy) return;
-  busy = true; $("go").disabled = true;
+  busy = true; $("go").disabled = true; showStop(true);
   try { await runAutoEdit(); }
   catch (e) { log("Error: " + (e && e.message || e), "bad"); }
-  finally { busy = false; $("go").disabled = false; }
+  finally { busy = false; $("go").disabled = false; showStop(false); }
+}
+
+// ---------- Stop / Reset ----------
+let CUR_JOB = null, STOPPING = false;
+function showStop(on) {
+  if ($("stop")) $("stop").style.display = on ? "inline-block" : "none";
+  if (!on) { STOPPING = false; CUR_JOB = null; }
+}
+async function stopRequested(job) {
+  if (!STOPPING) return false;
+  try { await call("POST", "/api/job/" + job + "/cancel", {}, 5000); } catch (e) {}
+  log("■ නැවැත්තුවා. Timeline එකේ දැනටමත් වැටුණ cuts එහෙමම තියෙනවා (ඕන නම් Ctrl+Z).", "warn");
+  showProgress("done", 0, null);
+  return true;
+}
+function stopNow() {
+  if (!busy) return;
+  STOPPING = true;
+  log("■ Stop ඔබුවා: engine එක නවත්තනවා…", "warn");
+  if (CUR_JOB) call("POST", "/api/job/" + CUR_JOB + "/cancel", {}, 5000).catch(() => {});
+}
+async function resetPanel() {
+  STOPPING = true;
+  try { await call("POST", "/api/reset", {}, 5000); } catch (e) {}
+  await sleep(1200);                    // running loops see STOPPING and end
+  busy = false; STOPPING = false; CUR_JOB = null;
+  for (const id of ["go", "sync", "qrun", "evfind", "rtest", "read"]) if ($(id)) $(id).disabled = false;
+  showStop(false);
+  if ($("prog")) $("prog").style.display = "none";
+  for (const id of ["strip", "legend"]) if ($(id)) $(id).innerHTML = "";
+  for (const id of ["striplbl", "syncinfo"]) if ($(id)) $(id).textContent = "";
+  if ($("log")) $("log").innerHTML = "";
+  for (const q of QUEUE) if (q.status === "running") q.status = "";
+  try { qSave(); qRender(); } catch (e) {}
+  log("↺ Reset: panel එක මුල් තත්වයට ආවා, engine එකේ run වෙන jobs නැවැත්තුවා.", "ok");
+  try { await ping(); } catch (e) {}
 }
 
 async function runAutoEdit(jobOpts) {
@@ -776,11 +812,14 @@ async function runAutoEdit(jobOpts) {
   };
   log(`Auto edit: ${evName} · ${kind === "multicam" ? "Multicamera" : "Manual cutting"} · ${fmt(range[0])} → ${fmt(range[1])}`);
   const job = (await call("POST", "/api/edit", body)).job;
+  CUR_JOB = job;
   let shown = 0, lastSegCount = -1, applyFails = 0;
   while (true) {
     await sleep(1000);
     let j;
+    if (await stopRequested(job)) return false;
     try { j = await call("GET", "/api/job/" + job); } catch (e) { continue; }
+    if (j.status === "cancelled") { log("■ නැවැත්තුවා. Timeline එකේ දැනටමත් වැටුණ cuts එහෙමම තියෙනවා (ඕන නම් Ctrl+Z).", "warn"); showProgress("done", j.progress || 0, null); return false; }
     showProgress(j.stage || "queued", j.progress || 0, j.eta);
     for (; shown < j.log.length; shown++) log(j.log[shown], j.log[shown].startsWith("ERROR") ? "bad" : "");
     if (j.segments && j.segments.length !== lastSegCount) {
@@ -1138,7 +1177,7 @@ async function collectClips(items, out = [], depth = 0) {
 
 async function runSync() {
   if (busy) return;
-  busy = true; $("sync").disabled = true; $("go").disabled = true;
+  busy = true; $("sync").disabled = true; $("go").disabled = true; showStop(true);
   try {
     const project = await ppro.Project.getActiveProject();
     if (!project) { log("Project එකක් open කරලා නැහැ.", "bad"); return; }
@@ -1151,11 +1190,14 @@ async function runSync() {
     if (!(await ping())) { log("Engine එකට සම්බන්ධ වෙන්න බැහැ.", "bad"); return; }
     log(`Sync: files ${files.length}ක් audio එකෙන් ගලපනවා…`);
     const job = (await call("POST", "/api/sync", { files: files.map((f) => ({ path: f.path, name: f.name })) })).job;
+  CUR_JOB = job;
     let res = null;
     while (true) {
       await sleep(1000);
       let j;
-      try { j = await call("GET", "/api/job/" + job); } catch (e) { continue; }
+      if (await stopRequested(job)) return false;
+    try { j = await call("GET", "/api/job/" + job); } catch (e) { continue; }
+    if (j.status === "cancelled") { log("■ නැවැත්තුවා. Timeline එකේ දැනටමත් වැටුණ cuts එහෙමම තියෙනවා (ඕන නම් Ctrl+Z).", "warn"); showProgress("done", j.progress || 0, null); return false; }
       $("syncinfo").textContent = `${Math.round((j.progress || 0) * 100)}% · ${j.stage_text || j.stage || ""}`;
       if (j.status === "error") { for (const l of j.log) log(l, l.startsWith("ERROR") ? "bad" : "mute"); return; }
       if (j.status === "done") { res = j.result; break; }
@@ -1164,7 +1206,7 @@ async function runSync() {
   } catch (e) {
     log("Sync: " + (e && e.message || e), "bad");
     if (e && e.stack) log("  " + String(e.stack).split("\n").slice(0, 3).join(" | "), "mute");
-  } finally { busy = false; $("sync").disabled = false; $("go").disabled = false; }
+  } finally { busy = false; $("sync").disabled = false; $("go").disabled = false; showStop(false); }
 }
 
 async function buildSyncedSequence(project, files, res) {
@@ -1269,10 +1311,11 @@ async function qRun() {
   if (busy) return;
   const todo = QUEUE.filter((q) => q.status !== "done");
   if (!todo.length) { log("ලිස්ට් එකේ edit කරන්න දෙයක් නැහැ.", "warn"); return; }
-  busy = true; $("go").disabled = true; $("qrun").disabled = true;
+  busy = true; $("go").disabled = true; $("qrun").disabled = true; showStop(true);
   try {
     let n = 0;
     for (const q of todo) {
+      if (STOPPING) { log("■ Batch ලිස්ට් එක නැවැත්තුවා.", "warn"); break; }
       n++;
       log(`── Batch ${n}/${todo.length}: ${q.seqName} · ${fmt(q.range[0])} → ${fmt(q.range[1])} · ${eventName(q.event)}`, "ok");
       q.status = "running"; qRender();
@@ -1289,7 +1332,7 @@ async function qRun() {
       q.status = ok ? "done" : "error"; qSave(); qRender();
     }
     log("✔ Batch ලිස්ට් එක ඉවරයි.", "ok");
-  } finally { busy = false; $("go").disabled = false; $("qrun").disabled = false; }
+  } finally { busy = false; $("go").disabled = false; $("qrun").disabled = false; showStop(false); }
 }
 
 // =====================================================================================
@@ -1297,7 +1340,7 @@ async function qRun() {
 // =====================================================================================
 async function findEvents() {
   if (busy) return;
-  busy = true; $("evfind").disabled = true;
+  busy = true; $("evfind").disabled = true; showStop(true);
   try {
     const sd = await readSequence();
     if (!sd) return;
@@ -1307,11 +1350,14 @@ async function findEvents() {
     const body = { project: { name: sd.name, fps: sd.fps, master_cam: 0, range,
                               cameras: sd.cams.map((c) => ({ name: c.name, clips: c.clips })), audio_tracks: sd.audio }, range };
     const job = (await call("POST", "/api/events", body)).job;
+  CUR_JOB = job;
     let res = null;
     while (true) {
       await sleep(1000);
       let j;
-      try { j = await call("GET", "/api/job/" + job); } catch (e) { continue; }
+      if (await stopRequested(job)) return false;
+    try { j = await call("GET", "/api/job/" + job); } catch (e) { continue; }
+    if (j.status === "cancelled") { log("■ නැවැත්තුවා. Timeline එකේ දැනටමත් වැටුණ cuts එහෙමම තියෙනවා (ඕන නම් Ctrl+Z).", "warn"); showProgress("done", j.progress || 0, null); return false; }
       showProgress("audio", j.progress || 0, null);
       if (j.status === "error") { for (const l of j.log) log(l, l.startsWith("ERROR") ? "bad" : "mute"); return; }
       if (j.status === "done") { res = j.result; break; }
@@ -1327,7 +1373,7 @@ async function findEvents() {
     showProgress("done", 1, null);
     log(`✔ Events ${res.events.length}ක් · markers ${n} · batch ලිස්ට් එකට ${evs.length}ක් දැම්මා. Event එක වැරදි නම් ලිස්ට් එකේ වෙනස් කරන්න.`, "ok");
   } catch (e) { log("Events: " + (e && e.message || e), "bad"); }
-  finally { busy = false; $("evfind").disabled = false; }
+  finally { busy = false; $("evfind").disabled = false; showStop(false); }
 }
 
 // =====================================================================================
@@ -1370,6 +1416,8 @@ async function stabilizePieces(project, sd, cams, result, kind) {
 }
 
 $("sync").onclick = runSync;
+if ($("stop")) $("stop").onclick = stopNow;
+if ($("reset")) $("reset").onclick = () => resetPanel().catch(() => {});
 $("qadd").onclick = qAddInOut;
 $("qrun").onclick = qRun;
 $("qclear").onclick = () => { QUEUE = []; qSave(); qRender(); };
@@ -1532,7 +1580,7 @@ const I18N = {
   s3_help: [null, "Set In/Out, pick the event and add it to the list, or find events to build the list from markers. Then edit them all at once."],
   qadd_btn: [null, "Add In/Out to list +"], evfind_btn: [null, "Find events"], qrun_btn: [null, "Edit the list ▶"], qclear_btn: [null, "Clear"],
   s4: [null, "Studio (presets, learn, stats)"], l_preset: [null, "Preset"], o_pick: [null, "— pick —"], l_pname: [null, "New name"], st_save: [null, "Save preset"],
-  st_refresh: [null, "List"], learn_btn: [null, "Learn from my changes"], stats_btn: [null, "Stats"], chk_btn: [null, "Check update"], upd_btn: [null, "Update"],
+  st_refresh: [null, "List"], stop_btn: [null, "■ Stop"], reset_btn: [null, "↺ Reset"], learn_btn: [null, "Learn from my changes"], stats_btn: [null, "Stats"], chk_btn: [null, "Check update"], upd_btn: [null, "Update"],
 };
 let LANG = "si";
 try { LANG = localStorage.getItem("autowed.lang") || "si"; } catch (e) {}
