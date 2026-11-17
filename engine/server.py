@@ -154,10 +154,26 @@ def api(method: str, path: str, body: dict | None = None):
             from . import prproj
             src = body["project_path"]
             base, _ = os.path.splitext(src)
-            dst = body.get("out_path") or f"{base} - PoruwaCut {_t.strftime('%H%M%S')}.prproj"
-            rep = prproj.build_multicam_cuts(src, dst, body["edit_seq"], body["nest_seq"], body["segments"],
-                                             body.get("cam_tracks"))
-            return 200, {"path": dst, "report": rep}
+            backup = None
+            if body.get("in_place"):
+                import shutil
+                backup = f"{base}.autowed-backup-{_t.strftime('%Y%m%d-%H%M%S')}.prproj"
+                shutil.copy2(src, backup)   # untouched copy of the project as saved by Premiere
+                dst = src
+            else:
+                dst = body.get("out_path") or f"{base} - AutoWed {_t.strftime('%H%M%S')}.prproj"
+            try:
+                rep = prproj.build_multicam_cuts(src, dst, body["edit_seq"], body["nest_seq"], body["segments"],
+                                                 body.get("cam_tracks"))
+            except Exception as e:  # nothing was written; drop the unneeded backup
+                if backup and os.path.exists(backup):
+                    os.remove(backup)
+                return 200, {"error": str(e)}
+            if body.get("in_place") and rep.get("multicam", 0) == 0:
+                import shutil
+                shutil.copy2(backup, src)   # nothing matched: leave the project exactly as it was
+                return 200, {"error": "nest pieces not found in the saved project", "report": rep}
+            return 200, {"path": dst, "report": rep, "backup": backup}
         if path == "/api/quit":
             threading.Timer(0.5, lambda: os._exit(0)).start()
             return 200, {"ok": True}
@@ -293,7 +309,7 @@ def serve(host="127.0.0.1", port=7788):
     except OSError:
         print(f"Port {port} දැනටමත් භාවිතයේ - PoruwaCut engine එකක් දැනටමත් run වෙනවා.", flush=True)
         return
-    print(f"PoruwaCut engine {__version__}  ->  http://{host}:{port}", flush=True)
+    print(f"AutoWed engine (Powered by Endora) {__version__}  ->  http://{host}:{port}", flush=True)
     print(f"  GPU decode (NVDEC): {'ON' if nvdec_available() else 'OFF'}   face detector: {FaceDetector().kind}"
           f"   ffmpeg: {FFMPEG}", flush=True)
     print("  මේ window එක open කරලා තියන්න. Premiere panel එක හෝ browser එකෙන් භාවිතා කරන්න.", flush=True)

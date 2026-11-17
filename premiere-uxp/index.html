@@ -36,14 +36,14 @@
 </style>
 </head>
 <body>
-  <div class="top"><h1>Poruwa<span>Cut</span></h1><span id="eng" class="mute">engine…</span></div>
+  <div class="top"><h1>Auto<span>Wed</span></h1><span id="eng" class="mute">engine…</span></div>
 
   <div id="upd"><b id="updtxt"></b><div id="updnotes" class="mute"></div>
     <button id="updbtn" class="go" style="margin-top:6px">Update කරන්න</button></div>
 
   <div class="sec">
     <b>1 · Sequence</b>
-    <div class="mute" style="margin-bottom:6px">Sync කරපු sequence එක open කරන්න (එක් කැමරාවකට එක video track එකක්).</div>
+    <div class="mute" style="margin-bottom:6px">Sync කරපු timeline එක open කරලා edit කරන්න ඕන කොටසට <b>In (I)</b> සහ <b>Out (O)</b> දාන්න. AutoWed edit කරන්නේ ඒ timeline එකේම, ඒ කොටස විතරයි.</div>
     <button id="read">Sequence කියවන්න</button> <button id="rtest" title="Manual cutting එකේ cut කිරීම ඔබේ Premiere එකේ වැඩද කියලා පොඩි test sequence එකක බලනවා">Razor test</button>
     <div id="seqinfo" class="mute" style="margin-top:6px"></div>
     <div id="tracks"></div>
@@ -58,8 +58,6 @@
         <option value="stacked">Manual cutting (stacked)</option>
       </select></div>
     <div class="hint" id="etypehint"></div>
-    <div class="row"><label>පරාසය</label>
-      <select id="range"><option value="inout">Sequence In/Out points</option><option value="all">මුළු sequence එකම</option></select></div>
     <div class="row"><label>අවම shot (s)</label><input id="min_shot" type="text" placeholder="auto"></div>
     <div class="row"><label>උපරිම shot (s)</label><input id="max_shot" type="text" placeholder="auto"></div>
   </div>
@@ -76,7 +74,7 @@
 
   <div id="log" style="margin-top:8px"></div>
 
-  <div id="foot"><span class="mute" id="ver"></span><button id="chk">Check update</button></div>
+  <div id="foot"><span class="mute" style="flex:1">Powered by <b style="color:#d4a24c">Endora</b></span><span class="mute" id="ver"></span><button id="chk">Check update</button></div>
   <script src="main.js"></script>
 </body>
 </html>

@@ -47,7 +47,7 @@ def check(force: bool = False) -> dict:
         rel = json.loads(_get(API))
         tag = rel.get("tag_name", "")
         asset = next((a for a in rel.get("assets", [])
-                      if a["name"].lower().startswith("poruwacut_setup") and a["name"].lower().endswith(".exe")), None)
+                      if a["name"].lower().startswith(("autowed_setup", "poruwacut_setup")) and a["name"].lower().endswith(".exe")), None)
         out["latest"] = tag.lstrip("vV")
         out["notes"] = (rel.get("body") or "")[:2000]
         if asset:

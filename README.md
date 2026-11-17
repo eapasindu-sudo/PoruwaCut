@@ -1,4 +1,6 @@
-# PoruwaCut – ශ්‍රී ලාංකීය මංගල උත්සව සඳහා Multicam Auto Edit
+# AutoWed – ශ්‍රී ලාංකීය මංගල උත්සව සඳහා Multicam Auto Edit
+
+*Powered by Endora*
 
 කැමරා 2–6ක footage එකේ visuals analyze කරලා, හැම මොහොතකම **හොඳම shot එක තියෙන කැමරාවට** ඉබේම මාරු වෙන edit එකක් Premiere Pro එකට හදලා දෙනවා.
 
@@ -63,21 +65,26 @@ GitHub නැතිව ඔබේ PC එකේම build කරන්න: Python 3
 
 ## 4. Premiere panel එකෙන් වැඩ කරන විදිහ
 
-1. සාමාන්‍ය විදිහටම footage sync කරන්න: **එක් කැමරාවකට එක video track එකක්** (V1 = Cam 1, V2 = Cam 2, ...).
-   Audio (DJI mics ආදිය) ඔබට කැමති විදිහට තියන්න. PoruwaCut ඒවා beats/වචන හොයන්න විතරක් අහනවා, වෙනස් කරන්නේ නැහැ.
-2. කොටසක් විතරක් නම් **In (I) / Out (O)** points දාන්න.
-3. Window › UXP Plugins › **PoruwaCut** › **Sequence කියවන්න**.
-4. **Event** එක තෝරන්න: Auto (AI), Groom/Bride Welcome, පෝරුව, පහන / කිරි කළය, First Dance, Table Visit,
-   Surprise Dance, Dance Floor, Speeches, Church Mass. (අලුත් events update එකෙන්ම එනවා.)
-5. **Edit වර්ගය**:
-   - **Multicamera edit**: කැමරා nest කරලා multicam enable කරලා angle cuts. Analysis එක යන ගමන් nest එක timeline
-     එකේ live cut වෙනවා. ඉවර වුණාම project එක save කරලා, හැම කෑල්ලක්ම multicam clip එකක් වුණු **project copy එකක්**
-     (`<project> - PoruwaCut <time>.prproj`) open වෙනවා. Program Monitor › Multi-Camera view (Shift+0) එකෙන් angles මාරු කරන්න.
-   - **Manual cutting (stacked)**: sequence එක clone කරලා, කැමරා tracks live cut කරලා තෝරපු කැමරාව විතරක් enable කරනවා.
-     Angle එකක් මාරු කරන්න කෑල්ල select කරලා **Shift+E**.
-     Premiere 27.1+ නම් Adobe razor එක, 26.x / 27.0 නම් clone + trim ක්‍රමය ඉබේම තෝරගන්නවා.
-     **පළවෙනි වතාවට කලින් "Razor test" ඔබලා** ඔබේ Premiere එකේ cut කිරීම හරියට වැඩද කියලා බලන්න.
-6. **Auto Edit ▶**. ප්‍රතිශතය (audio අහන කොටසත් එක්ක), ඉතිරි කාලය, සහ කැමරා පාට වලින් **live cut strip** එකක් පේනවා.
+AutoWed **අලුත් timelines හදන්නේ නැහැ**. ඔබේ sync කරපු timeline එකේම, **In / Out අතර කොටස විතරක්** edit කරනවා.
+(ලොකු වෙනස්කමකට කලින් ඔබේ timeline එකේ backup එකක් තියාගන්න.)
+
+1. Sync කරපු timeline එක: **එක් කැමරාවකට එක video track එකක්**. Audio ඔබට කැමති විදිහට.
+2. Edit කරන්න ඕන කොටසට **In (I)** සහ **Out (O)** දාන්න. (In/Out නැත්නම් AutoWed පටන් ගන්නේ නැහැ.)
+3. Window › UXP Plugins › **AutoWed** › **Sequence කියවන්න** › Event එක › Edit වර්ගය › **Auto Edit ▶**.
+
+**Manual cutting (stacked):** In/Out අතර කැමරා tracks ඒ timeline එකේම live cut වෙනවා, තෝරපු කැමරාව විතරක් enable.
+Angle මාරු කරන්න කෑල්ල select කරලා **Shift+E**. Audio වලට අත තියන්නේ නැහැ.
+
+**Multicamera edit:**
+- In/Out කොටසේ කැමරා video **ඒ timeline එකේම nest** කරනවා (V1 එකේ nest clip එකක්; ඇතුළත sequence එක Project panel එකේ පේනවා).
+  ඔබම දැනටමත් nest කරලා නම් AutoWed ඒ nest එකම පාවිච්චි කරනවා.
+- Analysis එක යන ගමන් nest clip එක timeline එකේ live cut වෙනවා.
+- ඉවර වුණාම angles ලියන්න: project එක **save → තත්පර කිහිපයකට close → angles ලියනවා → ඒ project එකම, ඒ timeline එකම ආයෙ open**.
+  ඊට කලින් `<project>.autowed-backup-<දිනය>.prproj` backup එකක් ඉබේම හැදෙනවා.
+- Angles මාරු කරන්න: Program Monitor › Multi-Camera (Shift+0).
+
+**Razor test:** පළවෙනි වතාවට කලින් ඔබන්න. Timeline එකේ cut කිරීම (slow motion clips එක්ක) sync එක නැති නොකර වැඩද කියලා පොඩි test sequence එකක බලනවා.
+Live cut එකකදී sync check එකක් අසාර්ථක වුණොත් AutoWed live cuts නවත්වනවා. වැරදි sync එකක් තියෙන edit එකක් හදන්නේ නැහැ.
 
 ### Events වල cut කරන විදිහ
 | Event | Cuts වැටෙන්නේ | විශේෂ |

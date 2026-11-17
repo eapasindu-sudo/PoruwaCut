@@ -1,6 +1,6 @@
 {
   "id": "lk.poruwacut.panel",
-  "name": "PoruwaCut",
+  "name": "AutoWed",
   "version": "0.1.0",
   "main": "index.html",
   "host": {
@@ -22,7 +22,7 @@
       "id": "poruwacut-main",
       "type": "panel",
       "label": {
-        "default": "PoruwaCut Multicam"
+        "default": "AutoWed"
       },
       "minimumSize": {
         "width": 280,

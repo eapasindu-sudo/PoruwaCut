@@ -8,10 +8,10 @@
 
 [Setup]
 AppId={{8F3C2A51-6B7E-4D2A-9C1F-5E0A7B4D2C91}
-AppName=PoruwaCut
+AppName=AutoWed
 AppVersion={#MyVersion}
-AppVerName=PoruwaCut {#MyVersion}
-AppPublisher=PoruwaCut
+AppVerName=AutoWed {#MyVersion}
+AppPublisher=Endora
 DefaultDirName={localappdata}\Programs\PoruwaCut
 DisableDirPage=auto
 DisableProgramGroupPage=yes
@@ -19,10 +19,10 @@ PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\Output
-OutputBaseFilename=PoruwaCut_Setup_{#MyVersion}
+OutputBaseFilename=AutoWed_Setup_{#MyVersion}
 SetupIconFile=icon.ico
 UninstallDisplayIcon={app}\engine\PoruwaCutEngine.exe
-UninstallDisplayName=PoruwaCut {#MyVersion}
+UninstallDisplayName=AutoWed {#MyVersion} (Endora)
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
@@ -30,11 +30,14 @@ CloseApplications=force
 RestartApplications=no
 
 [Messages]
-FinishedLabel=PoruwaCut installed.%n%nOpen Premiere Pro and go to:%nWindow > UXP Plugins > PoruwaCut Multicam%n%n(If Premiere was open, restart it.)
+FinishedLabel=AutoWed installed. Powered by Endora.%n%nOpen Premiere Pro and go to:%nWindow > UXP Plugins > AutoWed%n%n(If Premiere was open, restart it.)
 
 [InstallDelete]
 ; remove the previous engine build completely so old libraries never mix with new ones
 Type: filesandordirs; Name: "{app}\engine"
+; shortcuts from the PoruwaCut-named versions (now AutoWed)
+Type: filesandordirs; Name: "{userprograms}\PoruwaCut"
+Type: files; Name: "{userstartup}\PoruwaCut Engine.lnk"
 
 [Files]
 Source: "..\dist\PoruwaCutEngine\*"; DestDir: "{app}\engine"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -45,11 +48,11 @@ Source: "..\dist\PoruwaCut.ccx"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{userprograms}\PoruwaCut\PoruwaCut Engine"; Filename: "{app}\engine\PoruwaCutEngine.exe"
-Name: "{userprograms}\PoruwaCut\PoruwaCut in browser"; Filename: "http://127.0.0.1:7788"
-Name: "{userprograms}\PoruwaCut\Reinstall Premiere plugin (ccx)"; Filename: "{app}\PoruwaCut.ccx"
-Name: "{userprograms}\PoruwaCut\Read me"; Filename: "{app}\README.md"
-Name: "{userstartup}\PoruwaCut Engine"; Filename: "{app}\engine\PoruwaCutEngine.exe"
+Name: "{userprograms}\AutoWed\AutoWed Engine"; Filename: "{app}\engine\PoruwaCutEngine.exe"
+Name: "{userprograms}\AutoWed\AutoWed in browser"; Filename: "http://127.0.0.1:7788"
+Name: "{userprograms}\AutoWed\Reinstall Premiere plugin (ccx)"; Filename: "{app}\PoruwaCut.ccx"
+Name: "{userprograms}\AutoWed\Read me"; Filename: "{app}\README.md"
+Name: "{userstartup}\AutoWed Engine"; Filename: "{app}\engine\PoruwaCutEngine.exe"
 
 [Run]
 ; 1) Premiere plugin through Adobe's own installer agent (silent, also on updates)
@@ -57,11 +60,12 @@ Filename: "{code:UpiaPath}"; Parameters: "/install ""{app}\PoruwaCut.ccx"""; Sta
 ; 2) start the engine (also after a silent auto-update)
 Filename: "{app}\engine\PoruwaCutEngine.exe"; Flags: nowait
 ; 3) optional fallback: hand the .ccx to Creative Cloud / ZXP-UXP Installer
-Filename: "{app}\PoruwaCut.ccx"; Description: "Open the plugin file (.ccx) - only if PoruwaCut is missing in Premiere"; Flags: shellexec postinstall skipifsilent unchecked
+Filename: "{app}\PoruwaCut.ccx"; Description: "Open the plugin file (.ccx) - only if AutoWed is missing in Premiere"; Flags: shellexec postinstall skipifsilent unchecked
 
 [UninstallRun]
 Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM PoruwaCutEngine.exe"; Flags: runhidden; RunOnceId: "KillEngine"
-Filename: "{code:UpiaPath}"; Parameters: "/remove ""PoruwaCut"""; Flags: runhidden; Check: UpiaExists; RunOnceId: "RemovePlugin"
+Filename: "{code:UpiaPath}"; Parameters: "/remove ""AutoWed"""; Flags: runhidden; Check: UpiaExists; RunOnceId: "RemovePlugin"
+Filename: "{code:UpiaPath}"; Parameters: "/remove ""PoruwaCut"""; Flags: runhidden; Check: UpiaExists; RunOnceId: "RemovePluginOld"
 
 [Code]
 function UpiaPath(Param: String): String;

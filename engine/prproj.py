@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import gzip
+import os
 import uuid
 import xml.etree.ElementTree as ET
 
@@ -248,6 +249,7 @@ def _frame_ticks(objs, e_uid):
 
 def build_multicam_cuts(src: str, dst: str, edit_seq: str, nest_seq: str, segments: list[dict],
                         cam_tracks: list[int] | None = None) -> dict:
+    same_file = os.path.abspath(src) == os.path.abspath(dst)
     """Split every nest clip on the edit sequence's video tracks at the cut points and make each
     piece a multicam clip showing the chosen angle. segments: [{start, end, cam}] in nest time."""
     root = _load(src)
@@ -358,7 +360,10 @@ def build_multicam_cuts(src: str, dst: str, edit_seq: str, nest_seq: str, segmen
                 el = ET.SubElement(items_el, "TrackItem")
                 el.set("Index", str(i))
                 el.set("ObjectRef", ref)
-    for g in root.iter("MZ.Project.GUID"):
-        g.text = str(uuid.uuid4())
-    _save(root, dst)
+    if not same_file:
+        for g in root.iter("MZ.Project.GUID"):
+            g.text = str(uuid.uuid4())
+    tmp = dst + ".autowed-tmp"
+    _save(root, tmp)
+    os.replace(tmp, dst)
     return report
