@@ -9,6 +9,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
 import time
 
 import numpy as np
@@ -33,7 +34,8 @@ def _merge_into(committed: list, new: list):
 def run(project: dict, event: str = "auto", out_dir: str = "out", overrides: dict | None = None,
         analysis_fps: float | None = None, use_gpu: bool = True, workers: int = 2, layout: str = "stacked",
         remove_dead: bool = False, cache_dir: str | None = None, write_xml: bool = True, log=print,
-        progress=None, on_segments=None, window: float = 60.0, lookahead: float = 12.0) -> dict:
+        progress=None, on_segments=None, window: float = 60.0, lookahead: float = 12.0,
+        xml_name: str | None = None) -> dict:
     """progress(stage, overall, stage_frac); on_segments(committed_segments, committed_until)."""
     t_start = time.time()
     if event in ("ceremony",):
@@ -167,8 +169,9 @@ def run(project: dict, event: str = "auto", out_dir: str = "out", overrides: dic
     np.savez_compressed(os.path.join(out_dir, "scores.npz"), times=times, scores=scores)
     prog("xml", 0.0)
     if write_xml:
-        xp = os.path.join(out_dir, f"AutoEdit_{preset.id}.xml")
-        build_xml(project, result, xp, layout=layout, remove_dead=remove_dead)
+        fname = re.sub(r'[\\/:*?"<>|]+', "_", xml_name).strip() if xml_name else f"AutoEdit_{preset.id}"
+        xp = os.path.join(out_dir, f"{fname}.xml")
+        build_xml(project, result, xp, layout=layout, remove_dead=remove_dead, seq_name=xml_name)
         result["xml"] = os.path.abspath(xp)
     with open(os.path.join(out_dir, "result.json"), "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2, ensure_ascii=False)

@@ -322,6 +322,7 @@ async function uniqueName(project, base) {
 
 const EPS = 0.02;
 async function itemsOf(track) {
+  if (typeof track === "function") track = await track();
   const out = [];
   for (const it of track.getTrackItems(ppro.Constants.TrackItemType.CLIP, false)) {
     out.push({ it, a: (await it.getStartTime()).seconds, b: (await it.getEndTime()).seconds });
@@ -433,7 +434,10 @@ async function removeItems(project, seq, items, mediaType) {
 }
 
 async function emulatedRazor(project, seq, vIndex, t) {
-  const track = await seq.getVideoTrack(vIndex);
+  // Premiere 26.5 also invalidates sequence and track objects after an edit: fetch them every time
+  const g = seq.guid.toString();
+  const seqNow = async () => (seq = await freshSeq(project, seq, g));
+  const track = async () => (await seqNow()).getVideoTrack(vIndex);
   const hit = (await itemsOf(track)).find((x) => x.a < t - EPS && t + EPS < x.b);
   if (!hit) return false;
   const { a, b } = hit;
@@ -443,7 +447,7 @@ async function emulatedRazor(project, seq, vIndex, t) {
   const left = t - a, right = b - t;
   const cloneAction = async (win, offset) => {
     const it = await locate(track, win);
-    const editor = ppro.SequenceEditor.getEditor(seq);
+    const editor = ppro.SequenceEditor.getEditor(await seqNow());
     transact(project, "AutoWed cut", () => [editor.createCloneTrackItemAction(it, tt(offset), 0, 0, true, false)]);
   };
   let cloneWin = null;
@@ -464,7 +468,7 @@ async function emulatedRazor(project, seq, vIndex, t) {
     try {
       if (cloneWin) {
         const c = await locate(track, cloneWin);
-        if (c) await removeItems(project, seq, [c], ppro.Constants.MediaType.VIDEO);
+        if (c) await removeItems(project, await seqNow(), [c], ppro.Constants.MediaType.VIDEO);
       }
       await fixItem(project, locator(track, [a, b]), { a, b, inp: o.inp });
       log(`Cut ${fmt(t)} ආපස්සට හැරෙව්වා: clip එක කලින් තිබුණු විදිහටම තියෙනවා.`, "warn");
@@ -483,7 +487,8 @@ async function razorTracks(project, seq, tracks, t, native) {
     transact(project, "AutoWed cut", () => tracks.map((ti) => editor.createRazorTrackAction(V, ti, tt(t), false, V)));
     return;
   }
-  for (const ti of tracks) await emulatedRazor(project, seq, ti, t);
+  const g = seq.guid.toString();
+  for (const ti of tracks) await emulatedRazor(project, await freshSeq(project, seq, g), ti, t);
 }
 
 // Live applier: cuts the given tracks at every committed cut; for "stacked" also enables only the
@@ -500,7 +505,13 @@ function makeApplier(project, target, kind, cutTracks, trackOfCam, rangeT0, rang
     for (const t of times) {
       const key = t.toFixed(3);
       if (done.has(key) || t <= 0.001) continue;
-      await razorTracks(project, await tgt(), cutTracks, t, native);
+      try { await razorTracks(project, await tgt(), cutTracks, t, native); }
+      catch (e) {
+        // one more try with everything fetched again; if it still fails, skip only this cut
+        await sleep(150);
+        try { await razorTracks(project, await tgt(), cutTracks, t, native); }
+        catch (e2) { log(`Cut ${fmt(t)} මඟ හැරියා: ${e2 && e2.message || e2}`, "warn"); }
+      }
       done.add(key);
     }
   }
@@ -673,6 +684,7 @@ async function runAutoEdit() {
     return;
   }
   const project = await ppro.Project.getActiveProject();
+  sd.guid = sd.seq.guid.toString();
   const kind = $("etype").value;
   const range = [sd.inT, sd.outT];
   const event = $("event").value || "auto";
@@ -706,7 +718,8 @@ async function runAutoEdit() {
     project: { name: sd.name, fps: sd.fps, master_cam: 0, range,
                cameras: cams.map((c) => ({ name: c.name, clips: c.clips })), audio_tracks: sd.audio },
     event,
-    options: { min_shot: numOrNull("min_shot"), max_shot: numOrNull("max_shot"), layout: "stacked" },
+    options: { min_shot: numOrNull("min_shot"), max_shot: numOrNull("max_shot"), layout: "stacked",
+               xml_name: await uniqueName(project, `${sd.name} - AutoWed ${evName} ${stamp()}`) },
   };
   log(`Auto edit: ${evName} · ${kind === "multicam" ? "Multicamera" : "Manual cutting"} · ${fmt(range[0])} → ${fmt(range[1])}`);
   const job = (await call("POST", "/api/edit", body)).job;
@@ -743,6 +756,23 @@ async function addDeadMarkers(project, seq, result) {
   } catch (e) { log("Markers: " + e, "warn"); }
 }
 
+function stamp() {
+  const d = new Date(), p2 = (n) => String(n).padStart(2, "0");
+  return `${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}`;
+}
+
+// a copy of the finished edit as its own sequence (from the engine's XML), next to the in-place edit
+async function importCopy(proj, result) {
+  if (!result || !result.xml) return;
+  try {
+    const ok = await proj.importFiles([result.xml], true);
+    if (ok === false) throw new Error("import refused");
+    log(`Copy එකක් අලුත් sequence එකක් විදිහට import කළා: "${result.xml.split(/[\\/]/).pop().replace(/\.xml$/i, "")}"`, "ok");
+  } catch (e) {
+    log("Copy sequence එක import කරන්න බැරි වුණා (" + (e && e.message || e) + "). File › Import එකෙන් ගන්න: " + result.xml, "warn");
+  }
+}
+
 async function finish(project, kind, sd, nest, nestInfo, applier, cams, result) {
   showProgress("finish", 0.99, null);
   renderStrip(result.segments, result.range[0], result.range[1], result.range[1]);
@@ -752,16 +782,17 @@ async function finish(project, kind, sd, nest, nestInfo, applier, cams, result) 
     catch (e) { log("Timeline cut: " + (e && e.message || e), "bad"); applier = null; }
   }
   reportSyncWarns();
-  sd.seq = await freshSeq(project, sd.seq);
+  sd.seq = await freshSeq(project, sd.seq, sd.guid);
   await addDeadMarkers(project, sd.seq, result);
   if (kind === "stacked") {
     if (!applier) {
       log("Timeline එකේ cut කරන්න බැරි වුණ නිසා ඔබේ timeline එකට තවත් වෙනස්කම් කළේ නැහැ (අලුත් sequence එකකුත් හැදුවේ නැහැ).", "warn");
-      if (result.xml) log("ඕන නම් මේ edit එක File › Import එකෙන් ගන්න: " + result.xml, "mute");
+      await importCopy(project, result);
       log("Razor test එක ඔබලා ඒකේ screenshot එකක් එවන්න.", "mute");
       showProgress("done", 1, null);
       return;
     }
+    await importCopy(project, result);
     showProgress("done", 1, null);
     log(`✔ ඉවරයි · cuts ${s.cuts} · සාමාන්‍ය shot ${s.avg_shot}s · angle මාරු කරන්න කෑල්ල select කරලා Shift+E.`, "ok");
     return;
@@ -788,6 +819,7 @@ async function finish(project, kind, sd, nest, nestInfo, applier, cams, result) 
     const e = seqs.find((x) => x.name === seqName);
     if (e) await opened.openSequence(e);
   } catch (e) {}
+  await importCopy(opened, result);
   if (r.error) { log("Multicam angles ලියන්න බැරි වුණා: " + r.error + " (project එක වෙනස් වුණේ නැහැ)", "bad"); return; }
   showProgress("done", 1, null);
   log(`✔ ඉවරයි · multicam pieces ${r.report.multicam} · cuts ${s.cuts} · සාමාන්‍ය shot ${s.avg_shot}s`, "ok");
@@ -803,7 +835,10 @@ async function razorTest() {
     const project = await ppro.Project.getActiveProject();
     const seq = project && (await project.getActiveSequence());
     if (!seq) { log("Test එකට sequence එකක් open කරන්න.", "bad"); return; }
-    const test = await cloneSequence(project, seq, await uniqueName(project, `${seq.name} - AutoWed Razor Test`));
+    let test = await cloneSequence(project, seq, await uniqueName(project, `${seq.name} - AutoWed Razor Test`));
+    const testG = test.guid.toString();
+    const T_ = async () => (test = await freshSeq(project, test, testG));
+    await T_();
     await project.openSequence(test);
     const native = hasNativeRazor(test);
     // the longest clip on any video track
@@ -813,7 +848,7 @@ async function razorTest() {
       if (!best || x.b - x.a > best.b - best.a) { best = x; bestTrack = t; }
     }
     if (!best) { log("Video clip එකක් නැහැ.", "bad"); return; }
-    const aCount = async () => { let n = 0; const c = await test.getAudioTrackCount(); for (let i = 0; i < c; i++) n += (await itemsOf(await test.getAudioTrack(i))).length; return n; };
+    const aCount = async () => { await T_(); let n = 0; const c = await test.getAudioTrackCount(); for (let i = 0; i < c; i++) n += (await itemsOf(await test.getAudioTrack(i))).length; return n; };
     const audioBefore = await aCount();
     const o = await readTI(best.it);
     const rate = o.out > o.inp ? (o.out - o.inp) / (o.b - o.a) : 1;
@@ -823,6 +858,7 @@ async function razorTest() {
     log(`Razor test (${native ? "Premiere razor" : "clone + trim"}) · V${bestTrack + 1} clip ${o.a.toFixed(2)}–${o.b.toFixed(2)}s · source ${o.inp.toFixed(2)}–${o.out.toFixed(2)}s · speed ${rate.toFixed(3)}`);
     const before = (await itemsOf(await test.getVideoTrack(bestTrack))).length;
     for (const t of pts) await razorTracks(project, test, [bestTrack], t, native);
+    await T_();
     const after = (await itemsOf(await test.getVideoTrack(bestTrack))).filter((x) => x.a >= o.a - EPS && x.b <= o.b + EPS);
     let ok = (await itemsOf(await test.getVideoTrack(bestTrack))).length === before + 3 && after.length === 4;
     for (const p of after) {

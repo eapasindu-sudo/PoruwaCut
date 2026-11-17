@@ -112,7 +112,8 @@ def _run_edit(job, body):
                 ov["cam_bias"] = [float(x) for x in o["cam_bias"]]
             res = run(p, mode, out_dir, ov, (float(o["fps"]) if o.get("fps") else None), not o.get("cpu", False),
                       int(o.get("workers", 2)), o.get("layout", "stacked"), bool(o.get("remove_dead", False)),
-                      log=log, progress=_progress(job), on_segments=_on_segments(job))
+                      log=log, progress=_progress(job), on_segments=_on_segments(job),
+                      xml_name=(o.get("xml_name") or None))
             res.pop("beats", None)
             job["result"] = res
             job["progress"] = 1.0
