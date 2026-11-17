@@ -310,7 +310,16 @@ async function readSequence(rangeOverride) {
 // Premiere crashes when edits arrive back to back while it is still redrawing the timeline:
 // every live edit is followed by a short pause (see breathe()).
 let LIVE_GAP_MS = 60;
-async function breathe() { await sleep(LIVE_GAP_MS); }
+// "calm" mode (all cuts after the analysis): every 20 edits a 1 s rest, with a counter in the panel
+let CALM = false, CALM_N = 0, CALM_TOTAL = 0;
+async function breathe() {
+  await sleep(LIVE_GAP_MS);
+  if (!CALM) return;
+  CALM_N++;
+  if ($("stage")) $("stage").textContent = `Timeline එකේ cuts දානවා ${CALM_N}${CALM_TOTAL ? "/" + CALM_TOTAL : ""}…`;
+  if (CALM_TOTAL && $("pct")) $("pct").textContent = Math.min(99, Math.round(CALM_N / CALM_TOTAL * 100)) + "%";
+  if (CALM_N % 20 === 0) await sleep(1000);
+}
 function transact(project, label, makeActions) {
   let ok = false;
   project.lockedAccess(() => {
@@ -856,8 +865,20 @@ async function runAutoEdit(jobOpts) {
   const evName = eventName(event);
   showProgress("prepare", 0, null);
 
-  let cams, applier, nest = null, nestInfo = null;
-  if (kind === "stacked") {
+  let cams, applier = null, nest = null, nestInfo = null;
+  // output: "new" = your timeline is not touched, the finished edit opens as a new timeline (default);
+  // "live" / "end" = cuts in your own timeline (live, or all at the end)
+  const outMode = ($("x_live") && $("x_live").value) || "new";
+  if (outMode === "new") {
+    if (sd.nestInRange) {
+      nest = sd.nestInRange;
+      nestInfo = await camerasInsideNest(project, sd, nest);
+      cams = nestInfo.cams;
+      nest = null;                       // only read: nothing in your timeline changes
+    } else cams = sd.cams;
+    if (cams.length < 2) { log("කැමරා tracks 2ක් වත් හමු නොවුණි (එක් කැමරාවකට එක video track එකක් ඕන).", "bad"); return; }
+    log(`ඔබේ timeline එකට අත තියන්නේ නැහැ. Cuts මෙතන live පේනවා, ඉවර වුණාම අලුත් timeline එකක් open වෙනවා (${fmt(range[0])} → ${fmt(range[1])}).`, "ok");
+  } else if (kind === "stacked") {
     if (sd.cams.length < 2) { log("Manual cutting එකට කැමරා tracks 2ක් වත් ඕන (nest එකක් නෙවෙයි).", "bad"); return; }
     cams = sd.cams;
     applier = makeApplier(project, sd.seq, "stacked", cams.map((c) => c.track), cams.map((c) => c.track), range[0], range[1]);
@@ -877,6 +898,16 @@ async function runAutoEdit(jobOpts) {
   }
   renderLegend(cams.map((c, i) => `Cam ${i + 1}`));
   renderStrip([], range[0], range[1], range[0]);
+  // a run that crashed while its cuts were going in: put in the rest, no new analysis
+  if (outMode === "end" && applier) {
+    let pend = null;
+    try { pend = JSON.parse(localStorage.getItem("autowed.pending") || "null"); } catch (e) {}
+    if (pend && pend.guid === sd.guid && pend.kind === kind && Math.abs(pend.range[0] - range[0]) < 0.05 && Math.abs(pend.range[1] - range[1]) < 0.05 && pend.result) {
+      log("කලින් run එකේ cuts දාලා ඉවර වුණේ නැහැ: analysis නැතුව ඉතුරු cuts ටික දානවා…", "ok");
+      await finish(project, kind, sd, nest, nestInfo, applier, cams, pend.result, true);
+      return true;
+    }
+  }
 
   const body = {
     project: { name: sd.name, fps: sd.fps, master_cam: 0, range,
@@ -890,8 +921,8 @@ async function runAutoEdit(jobOpts) {
   const job = (await call("POST", "/api/edit", body)).job;
   CUR_JOB = job;
   let shown = 0, lastSegCount = -1, applyFails = 0, lastApply = 0, appliedCount = 0;
-  const live = !$("x_live") || $("x_live").value !== "end";
-  if (!live) log("Live cuts OFF: analysis ඉවර වුණාම cuts ඔක්කොම එකපාර දානවා (Premiere එකට ආරක්ෂිතයි).", "mute");
+  const live = outMode === "live";
+  if (outMode === "end") log("Live cuts OFF: analysis ඉවර වුණාම cuts ඔක්කොම එකපාර දානවා (Premiere එකට ආරක්ෂිතයි).", "mute");
   while (true) {
     await sleep(1000);
     let j;
@@ -923,7 +954,10 @@ async function runAutoEdit(jobOpts) {
       }
     }
     if (j.status === "error") return false;
-    if (j.status === "done") { await finish(project, kind, sd, nest, nestInfo, applier, cams, j.result); return true; }
+    if (j.status === "done") {
+      if (outMode === "new") { await finishNew(project, sd, cams, j.result, kind); return true; }
+      await finish(project, kind, sd, nest, nestInfo, applier, cams, j.result, outMode === "end"); return true;
+    }
   }
 }
 
@@ -966,10 +1000,39 @@ async function importCopy(proj, result) {
   }
 }
 
-async function finish(project, kind, sd, nest, nestInfo, applier, cams, result) {
+// default output: the finished edit (trims, silence cuts, white flash, mic, loudness, camera colors,
+// markers) comes in as a new timeline and opens; your own timeline is never edited, so nothing to crash
+async function finishNew(project, sd, cams, result, kind) {
+  showProgress("finish", 0.99, null);
+  renderStrip(result.segments, result.range[0], result.range[1], result.range[1]);
+  reportSyncWarns();
+  await qcReportOnly(result);
+  saveLastRun(sd, cams, result, kind);
+  if (!result.xml) { log("Engine එකෙන් timeline file එක ආවේ නැහැ.", "bad"); showProgress("done", 1, null); return; }
+  const before = new Set((await project.getSequences()).map((x) => x.guid.toString()));
+  await importCopy(project, result);
+  try {
+    const ns = await findNewSequence(project, before, 15000);
+    if (ns) { await project.openSequence(ns); log(`අලුත් timeline එක open කළා: "${ns.name}"`, "ok"); }
+  } catch (e) {}
+  const s = result.stats;
+  showProgress("done", 1, null);
+  log(`✔ ඉවරයි · cuts ${s.cuts} · සාමාන්‍ය shot ${s.avg_shot}s · ඔබේ මුල් timeline එක වෙනස් වුණේ නැහැ.`, "ok");
+}
+
+async function finish(project, kind, sd, nest, nestInfo, applier, cams, result, calm) {
   showProgress("finish", 0.99, null);
   renderStrip(result.segments, result.range[0], result.range[1], result.range[1]);
   const s = result.stats;
+  if (applier && calm) {
+    // all cuts after the analysis: save first (a crash loses nothing), remember the result so the
+    // next Auto Edit on the same In/Out only puts in what is missing, then cut in calm batches
+    try { await project.save(); log("Project එක save කළා. දැන් timeline එකේ cuts දානවා (කොටස් 20 බැගින්)…", "ok"); } catch (e) {}
+    try { localStorage.setItem("autowed.pending", JSON.stringify({ guid: sd.guid, kind, range: result.range, result })); } catch (e) {}
+    CALM = true; CALM_N = 0;
+    const nCuts = result.segments.length + 1;
+    CALM_TOTAL = nCuts * (kind === "stacked" ? cams.length : 2) + (kind === "stacked" ? result.segments.length * (cams.length - 1) : 0);
+  }
   if (applier) {
     try { await applier.apply(result.segments, result.range[1], true); }
     catch (e) {
@@ -977,6 +1040,10 @@ async function finish(project, kind, sd, nest, nestInfo, applier, cams, result) 
       try { await applier.apply(result.segments, result.range[1], true); }
       catch (e2) { log("Timeline cut: " + (e2 && e2.message || e2), "bad"); applier = null; }
     }
+  }
+  if (calm) {
+    CALM = false; CALM_TOTAL = 0;
+    if (applier) try { localStorage.removeItem("autowed.pending"); } catch (e) {}
   }
   reportSyncWarns();
   sd.seq = await freshSeq(project, sd.seq, sd.guid);
@@ -1520,7 +1587,19 @@ function gatherExtras() {
     loudness: v("x_loud", "copy") === "copy",
     best_mic: v("x_mic", "copy") === "copy",
     couple: v("x_couple", "on") === "on",
+    qc_markers: v("x_qc", "on") !== "off",
   };
+}
+
+// new-timeline output: the checks are already markers in the new timeline (engine), only the report here
+async function qcReportOnly(result) {
+  try { renderMoments(result); } catch (e) {}
+  const L = result.loudness;
+  if (L) log(`Loudness: ${L.lufs} LUFS (ඉලක්කය ${L.target}) → ${L.gain_db > 0 ? "+" : ""}${L.gain_db} dB`, "mute");
+  if (result.trim) log(`Smart trim: ${fmt(result.range[0])}–${fmt(result.trim[0])} සහ ${fmt(result.trim[1])}–${fmt(result.range[1])} හිස් කොටස් අයින් කළා.`, "ok");
+  if (result.silences && result.silences.length) log(`Silence: කොටස් ${result.silences.length}ක් (${Math.round(result.silences.reduce((a, x) => a + x.end - x.start, 0))}s) කපලා white flash දැම්මා.`, "ok");
+  if (((($("x_qc") || {}).value) || "on") === "on")
+    log(`QC markers අලුත් timeline එකේ: moments ${(result.moments || []).length}, weak takes ${(result.bad || []).length}, clipping ${(result.clipping || []).length}, mic gaps ${(result.mic_gaps || []).length}`, "ok");
 }
 
 async function qcReport(project, sd, result, cams, kind) {
@@ -1766,8 +1845,8 @@ try { showTab(localStorage.getItem("autowed.tab") || "edit"); } catch (e) { show
 
 // Live cuts on/off is remembered (off = every cut at the end, the safe way if Premiere crashes)
 if ($("x_live")) {
-  try { const v = localStorage.getItem("autowed.live"); if (v) $("x_live").value = v; } catch (e) {}
-  $("x_live").addEventListener("change", () => { try { localStorage.setItem("autowed.live", $("x_live").value); } catch (e) {} });
+  try { const v = localStorage.getItem("autowed.out"); if (v) $("x_live").value = v; } catch (e) {}
+  $("x_live").addEventListener("change", () => { try { localStorage.setItem("autowed.out", $("x_live").value); } catch (e) {} });
 }
 
 // "Enabled audio only" is remembered too

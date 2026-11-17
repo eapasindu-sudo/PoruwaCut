@@ -296,6 +296,16 @@ def run(project: dict, event: str = "auto", out_dir: str = "out", overrides: dic
                   "beats": int(len(beats)), "phrase_points": int(len(ph[0])),
                   "seconds": round(time.time() - t_start, 1)},
     }
+    if ex.get("qc_markers"):
+        # the new timeline carries the checks as markers (its times are mapped past trims / silences)
+        for m in result.get("moments") or []:
+            result["markers"].append({"time": m["time"], "name": f"Moment: {m.get('kind', '')}"})
+        for b in result.get("bad") or []:
+            result["markers"].append({"time": b["start"], "name": f"Weak take: {b.get('name', '')} ({b.get('why', '')})"})
+        for c in (result.get("clipping") or [])[:40]:
+            result["markers"].append({"time": c["start"], "name": f"Audio clipping: {c.get('name', '')}"})
+        for g in (result.get("mic_gaps") or [])[:40]:
+            result["markers"].append({"time": g["start"], "name": f"Mic drop-out: {g.get('name', '')}"})
     with open(os.path.join(out_dir, "cuts.csv"), "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["start_sec", "end_sec", "camera", "quality"])
