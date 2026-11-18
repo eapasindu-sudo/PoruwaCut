@@ -877,28 +877,24 @@ async function runAutoEdit(jobOpts) {
       nest = null;                       // only read: nothing in your timeline changes
     } else cams = sd.cams;
     if (cams.length < 2) { log("කැමරා tracks 2ක් වත් හමු නොවුණි (එක් කැමරාවකට එක video track එකක් ඕන).", "bad"); return; }
-    log(`ඔබේ timeline එකට අත තියන්නේ නැහැ. Cuts මෙතන live පේනවා, ඉවර වුණාම අලුත් timeline එකක් open වෙනවා (${fmt(range[0])} → ${fmt(range[1])}).`, "ok");
-  } else if (kind === "stacked") {
-    if (sd.cams.length < 2) { log("Manual cutting එකට කැමරා tracks 2ක් වත් ඕන (nest එකක් නෙවෙයි).", "bad"); return; }
-    cams = sd.cams;
-    applier = makeApplier(project, sd.seq, "stacked", cams.map((c) => c.track), cams.map((c) => c.track), range[0], range[1]);
-    log(`"${sd.name}" timeline එකේම, ${fmt(range[0])} → ${fmt(range[1])} අතර cuts live වැටෙනවා…`, "ok");
+    log(`ඔබේ timeline එකට අත තියන්නේ නැහැ. Cuts මෙතන live පේනවා; ඉවර වුණාම timeline එකේ copy එකක් හදලා එකේ cuts දානවා (${fmt(range[0])} → ${fmt(range[1])}).`, "ok");
   } else {
-    nest = sd.nestInRange;
-    if (nest) log(`ඔබේ nest එක පාවිච්චි කරනවා: "${nest.name}"`, "ok");
-    else {
-      if (sd.cams.length < 2) { log("කැමරා tracks 2ක් වත් හමු නොවුණි.", "bad"); return; }
-      nest = await nestInPlace(project, sd, range);
-    }
-    nestInfo = await camerasInsideNest(project, sd, nest);
-    cams = nestInfo.cams;
-    if (cams.length < 2) { log("Nest එක ඇතුළේ කැමරා tracks 2ක් වත් හමු නොවුණි.", "bad"); return; }
-    applier = makeApplier(project, sd.seq, "multicam", [nest.track], [], Math.max(range[0], nest.start), Math.min(range[1], nest.end));
-    log(`Multicam: nest clip එක "${sd.name}" timeline එකේම live cut වෙනවා…`, "ok");
+    const st = await setupInPlace(project, sd, kind, range);
+    if (!st) return;
+    ({ applier, nest, nestInfo, cams } = st);
   }
   renderLegend(cams.map((c, i) => `Cam ${i + 1}`));
   renderStrip([], range[0], range[1], range[0]);
   // a run that crashed while its cuts were going in: put in the rest, no new analysis
+  if (outMode === "new") {
+    let pend = null;
+    try { pend = JSON.parse(localStorage.getItem("autowed.pending") || "null"); } catch (e) {}
+    if (pend && pend.origGuid === sd.guid && pend.kind === kind && Math.abs(pend.range[0] - range[0]) < 0.05 && Math.abs(pend.range[1] - range[1]) < 0.05 && pend.result) {
+      log("කලින් run එකේ අලුත් timeline එකට cuts දාලා ඉවර වුණේ නැහැ: analysis නැතුව ඉතුරු ටික දානවා…", "ok");
+      await finishInCopy(project, sd, kind, pend.result, evName, pend.guid);
+      return true;
+    }
+  }
   if (outMode === "end" && applier) {
     let pend = null;
     try { pend = JSON.parse(localStorage.getItem("autowed.pending") || "null"); } catch (e) {}
@@ -955,7 +951,7 @@ async function runAutoEdit(jobOpts) {
     }
     if (j.status === "error") return false;
     if (j.status === "done") {
-      if (outMode === "new") { await finishNew(project, sd, cams, j.result, kind); return true; }
+      if (outMode === "new") { await finishInCopy(project, sd, kind, j.result, evName, null); return true; }
       await finish(project, kind, sd, nest, nestInfo, applier, cams, j.result, outMode === "end"); return true;
     }
   }
@@ -990,17 +986,85 @@ function stamp() {
 
 // a copy of the finished edit as its own sequence (from the engine's XML), next to the in-place edit
 async function importCopy(proj, result) {
+  // Premiere 26 fails ("project appears to be damaged") on an FCP XML with more than ~25 clips and its
+  // importFiles still answers true, so the copy is no longer imported automatically: only its path is shown
   if (!result || !result.xml) return;
-  try {
-    const ok = await proj.importFiles([result.xml], true);
-    if (ok === false) throw new Error("import refused");
-    log(`Copy එකක් අලුත් sequence එකක් විදිහට import කළා: "${result.xml.split(/[\\/]/).pop().replace(/\.xml$/i, "")}"`, "ok");
-  } catch (e) {
-    log("Copy sequence එක import කරන්න බැරි වුණා (" + (e && e.message || e) + "). File › Import එකෙන් ගන්න: " + result.xml, "warn");
-  }
+  log("Silence cut / white flash / mic / loudness තියෙන XML copy එක file එකක් විදිහට save කළා (Premiere 26 එකට clips 25කට වැඩි XML import කරන්න බැහැ): " + result.xml, "mute");
 }
 
-// default output: the finished edit (trims, silence cuts, white flash, mic, loudness, camera colors,
+
+// Cutting in a timeline (the user's own, or AutoWed's copy of it): stacked = cut every camera track and
+// enable the chosen one; multicam = one nest clip in the range, cut and its angles set by prproj patch
+async function setupInPlace(project, sd, kind, range) {
+  let applier, nest = null, nestInfo = null, cams;
+  if (kind === "stacked") {
+    if (sd.cams.length < 2) { log("Manual cutting එකට කැමරා tracks 2ක් වත් ඕන (nest එකක් නෙවෙයි).", "bad"); return null; }
+    cams = sd.cams;
+    applier = makeApplier(project, sd.seq, "stacked", cams.map((c) => c.track), cams.map((c) => c.track), range[0], range[1]);
+    log(`"${sd.name}" timeline එකේ, ${fmt(range[0])} → ${fmt(range[1])} අතර cuts…`, "ok");
+  } else {
+    nest = sd.nestInRange;
+    if (nest) log(`Nest එක පාවිච්චි කරනවා: "${nest.name}"`, "ok");
+    else {
+      if (sd.cams.length < 2) { log("කැමරා tracks 2ක් වත් හමු නොවුණි.", "bad"); return null; }
+      nest = await nestInPlace(project, sd, range);
+    }
+    nestInfo = await camerasInsideNest(project, sd, nest);
+    cams = nestInfo.cams;
+    if (cams.length < 2) { log("Nest එක ඇතුළේ කැමරා tracks 2ක් වත් හමු නොවුණි.", "bad"); return null; }
+    applier = makeApplier(project, sd.seq, "multicam", [nest.track], [], Math.max(range[0], nest.start), Math.min(range[1], nest.end));
+    log(`Multicam: nest clip එක "${sd.name}" timeline එකේ cut වෙනවා…`, "ok");
+  }
+  return { applier, nest, nestInfo, cams };
+}
+
+// Default output. Premiere 26 cannot import an FCP XML with more than ~25 clips, so the new timeline is
+// a copy of the editor's sequence made by Premiere itself; the cuts go into that copy in calm batches
+// after the analysis (project saved first). The editor's own timeline is never touched.
+let PEND_ORIG = null;
+async function openCopyFor(project, sd, name) {
+  const before = new Set((await project.getSequences()).map((x) => x.guid.toString()));
+  const src = await freshSeq(project, sd.seq, sd.guid);
+  transact(project, "AutoWed timeline copy", () => [src.createCloneAction()]);
+  const ns = await findNewSequence(project, before, 15000);
+  if (!ns) throw new Error("timeline copy එක හැදුණේ නැහැ");
+  try {
+    const pi = await ns.getProjectItem();
+    transact(project, "AutoWed name", () => [pi.createSetNameAction(name)]);
+  } catch (e) {}
+  await project.openSequence(ns);
+  await sleep(800);
+  return ns.guid.toString();
+}
+
+async function finishInCopy(project, sd, kind, result, evName, resumeGuid) {
+  const range = result.range;
+  let guid = resumeGuid;
+  try {
+    if (!guid) {
+      const name = await uniqueName(project, `${sd.name} - AutoWed ${evName} ${stamp()}`);
+      guid = await openCopyFor(project, sd, name);
+      log(`අලුත් timeline එක හැදුවා: "${name}". ඔබේ "${sd.name}" timeline එකට අත තියන්නේ නැහැ.`, "ok");
+    } else {
+      const ns = (await project.getSequences()).find((x) => x.guid.toString() === guid);
+      if (!ns) throw new Error("කලින් හදපු timeline copy එක හමු නොවුණි");
+      await project.openSequence(ns); await sleep(800);
+    }
+  } catch (e) {
+    log("අලුත් timeline එක හදන්න බැරි වුණා: " + (e && e.message || e), "bad");
+    showProgress("done", 1, null);
+    return;
+  }
+  const sd2 = await readSequence(range);
+  if (!sd2 || sd2.guid !== guid) { log("අලුත් timeline එක active කරගන්න බැරි වුණා.", "bad"); showProgress("done", 1, null); return; }
+  const st = await setupInPlace(project, sd2, kind, range);
+  if (!st) return;
+  PEND_ORIG = sd.guid;
+  try { await finish(project, kind, sd2, st.nest, st.nestInfo, st.applier, st.cams, result, true); }
+  finally { PEND_ORIG = null; }
+}
+
+// (old) XML output: the finished edit (trims, silence cuts, white flash, mic, loudness, camera colors,
 // markers) comes in as a new timeline and opens; your own timeline is never edited, so nothing to crash
 async function finishNew(project, sd, cams, result, kind) {
   showProgress("finish", 0.99, null);
@@ -1028,7 +1092,7 @@ async function finish(project, kind, sd, nest, nestInfo, applier, cams, result, 
     // all cuts after the analysis: save first (a crash loses nothing), remember the result so the
     // next Auto Edit on the same In/Out only puts in what is missing, then cut in calm batches
     try { await project.save(); log("Project එක save කළා. දැන් timeline එකේ cuts දානවා (කොටස් 20 බැගින්)…", "ok"); } catch (e) {}
-    try { localStorage.setItem("autowed.pending", JSON.stringify({ guid: sd.guid, kind, range: result.range, result })); } catch (e) {}
+    try { localStorage.setItem("autowed.pending", JSON.stringify({ guid: sd.guid, origGuid: PEND_ORIG, kind, range: result.range, result })); } catch (e) {}
     CALM = true; CALM_N = 0;
     const nCuts = result.segments.length + 1;
     CALM_TOTAL = nCuts * (kind === "stacked" ? cams.length : 2) + (kind === "stacked" ? result.segments.length * (cams.length - 1) : 0);
