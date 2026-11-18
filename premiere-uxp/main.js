@@ -497,8 +497,25 @@ async function removeItems(project, seq, items, mediaType) {
   transact(project, "AutoWed undo cut", () => [ppro.SequenceEditor.getEditor(seq).createRemoveItemsAction(sel, false, mediaType)]);
 }
 
+// Premiere 26.5 has no razor, and its trims are real trims: moving a clip's start also moves its
+// in-point (and the other way round), so a piece can never be "slipped" into place. A cut at t is:
+//   1. clone the clip far to the right of the sequence (empty space, same content alignment + L)
+//   2. head-trim the clone to t+L      -> it now starts with the source frame of t
+//   3. tail-trim the original to t     -> original keeps [a, t]
+//   4. move the clone back by -L       -> clone fills [t, b], frame-exact
+// (verified on Premiere 26.5 against the source in-point). Nothing is deleted; only these 4 edits.
+const FAR = {};
+async function farOffset(project, seq, g) {
+  if (!FAR[g]) FAR[g] = Math.ceil((await (await freshSeq(project, seq, g)).getEndTime()).seconds + 120);
+  return FAR[g];
+}
+async function findItem(track, a, b) {
+  for (const x of await itemsOf(track)) {
+    if (Math.abs(x.a - a) < EPS * 4 && (b == null || Math.abs(x.b - b) < EPS * 4)) return x.it;
+  }
+  return null;
+}
 async function emulatedRazor(project, seq, vIndex, t) {
-  // Premiere 26.5 also invalidates sequence and track objects after an edit: fetch them every time
   const g = seq.guid.toString();
   const seqNow = async () => (seq = await freshSeq(project, seq, g));
   const track = async () => (await seqNow()).getVideoTrack(vIndex);
@@ -509,34 +526,44 @@ async function emulatedRazor(project, seq, vIndex, t) {
   if (!first) return false;
   const { a, b, o } = first;
   const rate = o.out > o.inp && b > a ? (o.out - o.inp) / (b - a) : 1;   // source seconds per timeline second
-  const srcAt = (time) => o.inp + (time - a) * rate;
-  const left = t - a, right = b - t;
-  const cloneAction = (win, offset) => retryStale(async () => {
-    const it = await locate(track, win);
-    const editor = ppro.SequenceEditor.getEditor(await seqNow());
-    transact(project, "AutoWed cut", () => [editor.createCloneTrackItemAction(it, tt(offset), 0, 0, true, false)]);
+  const wantIn = o.inp + (t - a) * rate;
+  const L = await farOffset(project, seq, g);
+  const act = (name, getIt, mk) => retryStale(async () => {
+    const it = await getIt();
+    if (!it) throw new Error(name + ": clip not found");
+    transact(project, "AutoWed cut", () => [mk(it)]);
   });
-  let cloneWin = null;
+  let cloned = false, trimmed = false;
   try {
-    if (left >= right) {
-      await fixItem(project, locator(track, [t, b]), { a: t, b, inp: srcAt(t) });          // original keeps [t, b]
-      await cloneAction([t, b], -left);
-      cloneWin = [a, t];
-      await fixItem(project, locator(track, cloneWin, [t, b]), { a, b: t, inp: o.inp });    // clone fills [a, t]
-    } else {
-      await fixItem(project, locator(track, [a, t]), { a, b: t, inp: o.inp });              // original keeps [a, t]
-      await cloneAction([a, t], left);
-      cloneWin = [t, b];
-      await fixItem(project, locator(track, cloneWin, [a, t]), { a: t, b, inp: srcAt(t) }); // clone fills [t, b]
+    // 1. clone far right
+    await act("clone", () => findItem(track, a, b), (it) => ppro.SequenceEditor.getEditor(seqNowSync()).createCloneTrackItemAction(it, tt(L), 0, 0, true, false));
+    cloned = true;
+    // 2. head-trim the clone to t+L (if this Premiere slips instead of trimming, fix the in-point)
+    await act("trim clone", () => findItem(track, a + L, b + L), (it) => it.createSetStartAction(tt(t + L)));
+    let c = await retryStale(async () => { const it = await findItem(track, t + L, b + L); return it ? readTI(it) : null; });
+    if (!c) throw new Error("clone trim");
+    if (Math.abs(c.inp - wantIn) > 0.02) {
+      await act("in clone", () => findItem(track, t + L, b + L), (it) => it.createSetInPointAction(tt(wantIn)));
     }
+    // 3. tail-trim the original
+    await act("trim original", () => findItem(track, a, b), (it) => it.createSetEndAction(tt(t)));
+    trimmed = true;
+    // 4. move the clone back into the gap
+    await act("move back", () => findItem(track, t + L, b + L), (it) => it.createMoveAction(tt(-L)));
+    const done = await retryStale(async () => { const it = await findItem(track, t, b); return it ? readTI(it) : null; });
+    if (!done) throw new Error("piece not in place");
+    if (Math.abs(done.inp - wantIn) > 0.02) syncWarns.push(fmt(t));
+    await breathe();
   } catch (e) {
-    // put this clip back exactly as it was before the failed cut
+    // put this clip back exactly as it was: remove the far clone, give the original its end back
     try {
-      if (cloneWin) {
-        const c = await locate(track, cloneWin);
-        if (c) await removeItems(project, await seqNow(), [c], ppro.Constants.MediaType.VIDEO);
+      const far = await retryStale(async () => (await itemsOf(track)).filter((x) => x.a > L - 1));
+      if (far.length) await removeItems(project, await seqNow(), far.map((x) => x.it), ppro.Constants.MediaType.VIDEO);
+      if (trimmed) {
+        const back = await retryStale(async () => (await itemsOf(track)).find((x) => Math.abs(x.b - b) < EPS * 4 && x.a > a + EPS));
+        if (back) await removeItems(project, await seqNow(), [back.it], ppro.Constants.MediaType.VIDEO);
+        await act("restore", () => findItem(track, a, t), (it) => it.createSetEndAction(tt(b)));
       }
-      await fixItem(project, locator(track, [a, b]), { a, b, inp: o.inp });
       log(`Cut ${fmt(t)} ආපස්සට හැරෙව්වා: clip එක කලින් තිබුණු විදිහටම තියෙනවා.`, "warn");
     } catch (e2) {
       log(`⚠ Cut ${fmt(t)} ආපස්සට හරවන්න බැරි වුණා (V${vIndex + 1}). Ctrl+Z එකෙන් "AutoWed cut" ආපස්සට ගන්න.`, "bad");
@@ -544,6 +571,7 @@ async function emulatedRazor(project, seq, vIndex, t) {
     throw e;
   }
   return true;
+  function seqNowSync() { return seq; }
 }
 
 async function razorTracks(project, seq, tracks, t, native) {
@@ -749,7 +777,7 @@ async function nestInPlace(project, sd, range) {
   if (!nseq) nseq = await findNewSequence(project, before);
   if (!nseq) throw new Error("nest (subsequence) හදන්න බැරි වුණා");
   const nGuid = nseq.guid.toString();
-  const nName = await uniqueName(project, `${sd.name} - AutoWed Nest ${fmt(range[0])}-${fmt(range[1])}`);
+  const nName = "AutoWed Nest";
   await renameSequence(project, nseq, nName);
   const seqG = sd.seq.guid.toString();
   const outer = async () => (await project.getSequences()).find((x) => x.guid.toString() === seqG) || sd.seq;
@@ -911,7 +939,7 @@ async function runAutoEdit(jobOpts) {
     event,
     options: { min_shot: numOrNull("min_shot"), max_shot: numOrNull("max_shot"), layout: "stacked", kind,
                extras: gatherExtras(),
-               xml_name: await uniqueName(project, `${sd.name} - AutoWed ${evName} ${stamp()}`) },
+               xml_name: evName },
   };
   log(`Auto edit: ${evName} · ${kind === "multicam" ? "Multicamera" : "Manual cutting"} · ${fmt(range[0])} → ${fmt(range[1])}`);
   const job = (await call("POST", "/api/edit", body)).job;
@@ -1022,29 +1050,64 @@ async function setupInPlace(project, sd, kind, range) {
 // a copy of the editor's sequence made by Premiere itself; the cuts go into that copy in calm batches
 // after the analysis (project saved first). The editor's own timeline is never touched.
 let PEND_ORIG = null;
-async function openCopyFor(project, sd, name) {
+// the new timeline = a Premiere subsequence of In..Out (only the clips in the range, all tracks, starting
+// at 00:00). The editor's own timeline is not edited (its In/Out are put back if a batch range needed others).
+async function openSubFor(project, sd, range, name) {
+  let seq = await freshSeq(project, sd.seq, sd.guid);
+  let io = null;
+  try { io = [(await seq.getInPoint()).seconds, (await seq.getOutPoint()).seconds]; } catch (e) {}
+  const needIO = !io || Math.abs(io[0] - range[0]) > 0.01 || Math.abs(io[1] - range[1]) > 0.01;
+  if (needIO) {
+    transact(project, "AutoWed range", () => [seq.createSetInPointAction(tt(range[0]))]);
+    seq = await freshSeq(project, sd.seq, sd.guid);
+    transact(project, "AutoWed range", () => [seq.createSetOutPointAction(tt(range[1]))]);
+    seq = await freshSeq(project, sd.seq, sd.guid);
+  }
   const before = new Set((await project.getSequences()).map((x) => x.guid.toString()));
-  const src = await freshSeq(project, sd.seq, sd.guid);
-  transact(project, "AutoWed timeline copy", () => [src.createCloneAction()]);
-  const ns = await findNewSequence(project, before, 15000);
-  if (!ns) throw new Error("timeline copy එක හැදුණේ නැහැ");
-  try {
-    const pi = await ns.getProjectItem();
-    transact(project, "AutoWed name", () => [pi.createSetNameAction(name)]);
-  } catch (e) {}
+  let ns = null;
+  try { await seq.createSubsequence(true); } catch (e) {}
+  ns = await findNewSequence(project, before, 15000);
+  if (needIO && io) {
+    try {
+      seq = await freshSeq(project, sd.seq, sd.guid);
+      transact(project, "AutoWed range", () => [seq.createSetInPointAction(tt(io[0]))]);
+      seq = await freshSeq(project, sd.seq, sd.guid);
+      transact(project, "AutoWed range", () => [seq.createSetOutPointAction(tt(io[1]))]);
+    } catch (e) {}
+  }
+  if (!ns) throw new Error("In/Out කොටසේ අලුත් timeline එක (subsequence) හැදුණේ නැහැ");
+  const ng = ns.guid.toString();
+  ns = (await project.getSequences()).find((x) => x.guid.toString() === ng) || ns;
+  await renameSequence(project, ns, name);
+  ns = (await project.getSequences()).find((x) => x.guid.toString() === ns.guid.toString()) || ns;
   await project.openSequence(ns);
   await sleep(800);
   return ns.guid.toString();
 }
 
+// every time in an engine result moved by d seconds (the subsequence starts at 00:00, not at In)
+function shiftResult(r, d) {
+  const x = JSON.parse(JSON.stringify(r));
+  const sh = (o, keys) => { for (const k of keys) if (typeof o[k] === "number") o[k] += d; };
+  x.range = [r.range[0] + d, r.range[1] + d];
+  if (x.trim) x.trim = [x.trim[0] + d, x.trim[1] + d];
+  for (const k of ["segments", "dead", "bad", "clipping", "mic_gaps", "silences"]) for (const o of x[k] || []) sh(o, ["start", "end"]);
+  for (const k of ["moments", "markers"]) for (const o of x[k] || []) sh(o, ["time"]);
+  for (const o of x.mic_choice || []) sh(o, ["start", "end"]);
+  x.shifted = true;
+  return x;
+}
+
 async function finishInCopy(project, sd, kind, result, evName, resumeGuid) {
-  const range = result.range;
   let guid = resumeGuid;
+  const origRange = result.shifted ? null : result.range.slice();
+  if (!result.shifted) result = shiftResult(result, -result.range[0]);
+  const range = result.range;
   try {
     if (!guid) {
-      const name = await uniqueName(project, `${sd.name} - AutoWed ${evName} ${stamp()}`);
-      guid = await openCopyFor(project, sd, name);
-      log(`අලුත් timeline එක හැදුවා: "${name}". ඔබේ "${sd.name}" timeline එකට අත තියන්නේ නැහැ.`, "ok");
+      const name = (result.event && eventName(result.event)) || evName;   // simple: the event name only, no numbers
+      guid = await openSubFor(project, sd, origRange, name);
+      log(`අලුත් timeline එක හැදුවා: "${name}" (In/Out කොටසේ clips විතරයි). ඔබේ "${sd.name}" timeline එකට අත තියන්නේ නැහැ.`, "ok");
     } else {
       const ns = (await project.getSequences()).find((x) => x.guid.toString() === guid);
       if (!ns) throw new Error("කලින් හදපු timeline copy එක හමු නොවුණි");
@@ -1428,7 +1491,7 @@ async function buildSyncedSequence(project, files, res) {
   const pl = res.placements.filter((p) => byPath.has(p.path));
   const firstVid = pl.filter((p) => p.has_video && !p.unsynced).sort((a, b) => a.start - b.start)[0];
   if (!firstVid) { log("Sync: video file එකක් නැති නිසා sequence එකක් හදන්න බැහැ.", "bad"); return; }
-  const name = await uniqueName(project, `Synced Sequence ${stamp()}`);
+  const name = "Synced Sequence";
   // sequence settings from a real camera clip; that clip is removed again right away
   let seq = await project.createSequenceFromMedia(name, [byPath.get(firstVid.path).item]);
   if (!seq) throw new Error("sequence එක හදන්න බැරි වුණා");
