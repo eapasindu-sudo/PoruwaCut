@@ -18,11 +18,11 @@ from .media import iter_frames, probe
 
 METRICS = ["sharp", "bright", "clip_hi", "clip_lo", "dx", "dy", "phase_resp",
            "local_change", "edges", "faces", "face_area", "face_central", "face_score", "pair_central",
-           "smile", "hug", "couple"]
+           "smile", "hug", "couple", "walk"]
 
 ANALYSIS_WIDTH = 480
 SMALL_WIDTH = 160
-VERSION = "4"
+VERSION = "5"
 # the couple's face embeddings (found by find_couple before the analysis), used for the "couple" metric
 COUPLE = {"centroids": None, "key": ""}
 
@@ -50,6 +50,9 @@ def _analyze_chunk(path: str, start: float, length: float, fps: float, use_gpu: 
     prev_small = None
     win = None
     last_face = None
+    bg = None          # slow background of a still camera, to see someone walking in front of it
+    bg_busy = 0
+    bg_age = 0
     for t, frame in iter_frames(path, start, length, fps, ANALYSIS_WIDTH, use_gpu):
         k = int(round((t - start) * fps))
         if k >= n:
@@ -81,6 +84,28 @@ def _analyze_chunk(path: str, start: float, length: float, fps: float, use_gpu: 
             M = np.float32([[1, 0, dx], [0, 1, dy]])
             warped = cv2.warpAffine(prev_small, M, (SMALL_WIDTH, sh), borderMode=cv2.BORDER_REPLICATE)
             out["local_change"][k] = float(np.abs(warped[4:-4, 4:-4] - small[4:-4, 4:-4]).mean() / 255.0)
+        # walk-by: a big blob that differs from this camera's background while the camera holds still
+        # (photographer / videographer / guest passing right in front of the lens)
+        moving = prev_small is not None and abs(out["dx"][k] * SMALL_WIDTH) + abs(out["dy"][k] * SMALL_WIDTH) > 1.5
+        if bg is None or moving or bg_age < 3:
+            bg = small.copy() if (bg is None or moving) else 0.5 * bg + 0.5 * small
+            bg_busy = 0
+            bg_age = 0 if moving or bg_age is None else bg_age + 1
+            out["walk"][k] = 0.0
+        else:
+            mask = (np.abs(small - bg) > 35).astype(np.uint8)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+            nlab, _, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+            big = float(stats[1:, cv2.CC_STAT_AREA].max()) / mask.size if nlab > 1 else 0.0
+            out["walk"][k] = big
+            if big < 0.12:
+                bg = 0.9 * bg + 0.1 * small
+                bg_busy = 0
+            else:
+                bg_busy += 1
+                bg = 0.99 * bg + 0.01 * small
+                if bg_busy > fps * 6 or (big > 0.6 and bg_busy > fps * 1.5):   # it stayed: a new scene / light change
+                    bg, bg_busy = small.copy(), 0
         prev_small = small
 
         if k % 2 == 0 or last_face is None:  # faces change slowly: detect on every 2nd frame

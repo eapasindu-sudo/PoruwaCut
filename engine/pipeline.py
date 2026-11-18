@@ -71,7 +71,8 @@ def _weak_takes(times, parts, project, min_len: float = 3.0):
         if not p:
             continue
         for key, why, test in (("sharp", "blur / focus", lambda v: v < -1.6), ("exposure", "exposure", lambda v: v > 1.5),
-                               ("shake", "shake", lambda v: v > 2.5)):
+                               ("shake", "shake", lambda v: v > 2.5), ("walk", "කෙනෙක් ඉස්සරහින් යනවා", lambda v: v > 0.8)):
+            ml = 0.8 if key == "walk" else min_len
             v = p.get(key)
             if v is None:
                 continue
@@ -82,7 +83,7 @@ def _weak_takes(times, parts, project, min_len: float = 3.0):
                     j = i
                     while j < len(bad) and bad[j]:
                         j += 1
-                    if j - i >= 2 and times[min(j, len(times) - 1)] - times[i] >= min_len:
+                    if j - i >= 2 and times[min(j, len(times) - 1)] - times[i] >= ml:
                         out.append({"cam": c, "name": project["cameras"][c]["name"], "why": why,
                                     "start": round(float(times[i]), 2), "end": round(float(times[min(j, len(times) - 1)]), 2)})
                     i = j

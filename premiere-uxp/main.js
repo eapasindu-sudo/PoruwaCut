@@ -544,19 +544,53 @@ async function removeItems(project, seq, items, mediaType) {
 // camera's own audio track when that clip sits there in sync (same content, so nothing changes), and
 // otherwise onto a spare muted track, disabled.
 let SPARE_AUDIO = {};
+const IO_OFFSET = {};   // per file: project-item In/Out vs timeline in-point (seconds)
+// camera colors without closing the project: the overwrite takes the project item's label, so the
+// camera's label is put on its project item for the edit and the old one put back right after
+const CAM_LABEL_IDX = [7, 2, 6, 5, 0, 15, 4, 11];     // Mango, Caribbean, Rose, Forest, Violet, Yellow, ...
+let LABEL_OF_TRACK = null;                              // { videoTrackIndex: labelIndex } while colors are on
+async function withLabel(project, pi, vIndex, fn) {
+  const want = LABEL_OF_TRACK && LABEL_OF_TRACK[vIndex];
+  if (want == null) return fn();
+  let old = null;
+  try { old = await pi.getColorLabelIndex(); } catch (e) {}
+  try { if (old !== want) transact(project, "AutoWed color", () => [pi.createSetColorLabelAction(want)]); } catch (e) {}
+  try { return await fn(); }
+  finally { if (old != null && old !== want) { try { transact(project, "AutoWed color", () => [pi.createSetColorLabelAction(old)]); } catch (e) {} } }
+}
+// the camera's own audio clip at t, when it plays in sync with the video clip (same file, same offset):
+// the overwrite then cuts it at the same frame and the new video/audio pieces stay linked
+async function ownAudioAt(project, seq, g, name, vStart, vIn, t) {
+  const s = await freshSeq(project, seq, g);
+  const n = await s.getAudioTrackCount();
+  for (let i = 0; i < n; i++) {
+    for (const x of (await s.getAudioTrack(i)).getTrackItems(ppro.Constants.TrackItemType.CLIP, false)) {
+      const a = (await x.getStartTime()).seconds, b = (await x.getEndTime()).seconds;
+      if (!(a < t + EPS && t + EPS < b)) continue;
+      let nm = ""; try { nm = await x.getName(); } catch (e) {}
+      if (nm !== name) continue;
+      const inp = (await x.getInPoint()).seconds;
+      if (Math.abs((inp - a) - (vIn - vStart)) > 0.02) continue;      // slipped for sync: leave it alone
+      let off = false; try { off = await x.isDisabled(); } catch (e) {}
+      return { index: i, disabled: off };
+    }
+  }
+  return null;
+}
 async function spareAudioIndex(project, seq, g) {
   if (SPARE_AUDIO[g] == null) SPARE_AUDIO[g] = await (await freshSeq(project, seq, g)).getAudioTrackCount();
   return SPARE_AUDIO[g];
 }
-async function emulatedRazor(project, seq, vIndex, t) {
+async function emulatedRazor(project, seq, vIndex, t, whole) {
   const g = seq.guid.toString();
   const seqNow = async () => (seq = await freshSeq(project, seq, g));
   const track = async () => (await seqNow()).getVideoTrack(vIndex);
   const first = await retryStale(async () => {
-    const h = (await itemsOf(track)).find((x) => x.a < t - EPS && t + EPS < x.b);
+    const h = (await itemsOf(track)).find((x) => whole ? Math.abs(x.a - t) < EPS * 4 : (x.a < t - EPS && t + EPS < x.b));
     if (!h) return null;
     let name = ""; try { name = await h.it.getName(); } catch (e) {}
-    return { a: h.a, b: h.b, o: await readTI(h.it), raw: await h.it.getProjectItem(), name };
+    let off = false; try { off = await h.it.isDisabled(); } catch (e) {}
+    return { a: h.a, b: h.b, o: await readTI(h.it), raw: await h.it.getProjectItem(), name, off };
   });
   if (!first) return false;
   const { a, b, o, raw } = first;
@@ -567,29 +601,57 @@ async function emulatedRazor(project, seq, vIndex, t) {
   }
   const pi = ppro.ClipProjectItem.cast(raw);
   const wantIn = o.inp + (t - a);
-  const at = { index: await spareAudioIndex(project, seq, g) };
-  let setIO = false;
-  try {
-    transact(project, "AutoWed cut", () => [pi.createSetInOutPointsAction(tt(wantIn), tt(o.out))]);
-    setIO = true;
-    await retryStale(async () => {
-      const s = await seqNow();
-      transact(project, "AutoWed cut", () => [ppro.SequenceEditor.getEditor(s).createOverwriteItemAction(raw, tt(t), vIndex, at.index)]);
-    });
-  } finally {
-    if (setIO) { try { transact(project, "AutoWed cut", () => [pi.createClearInOutPointsAction()]); } catch (e) {} }
+  const own = await ownAudioAt(project, seq, g, first.name, a, o.inp, t);
+  const at = own ? { index: own.index, own: true, disabled: own.disabled } : { index: await spareAudioIndex(project, seq, g) };
+  // Some files (e.g. phones / action cams) place a project item's In/Out a few frames away from the
+  // timeline clip's in-point (seen: 16 frames). The overwrite is checked against the clip, and redone
+  // with the measured offset, which is remembered per file for the next cuts.
+  const overwriteFrom = async (inPt, outPt) => withLabel(project, pi, vIndex, async () => {
+    let setIO = false;
+    try {
+      transact(project, "AutoWed cut", () => [pi.createSetInOutPointsAction(tt(inPt), tt(outPt))]);
+      setIO = true;
+      await retryStale(async () => {
+        const s = await seqNow();
+        transact(project, "AutoWed cut", () => [ppro.SequenceEditor.getEditor(s).createOverwriteItemAction(raw, tt(t), vIndex, at.index)]);
+      });
+    } finally {
+      if (setIO) { try { transact(project, "AutoWed cut", () => [pi.createClearInOutPointsAction()]); } catch (e) {} }
+    }
+  });
+  const readNew = () => retryStale(async () => { const it = await findItem(track, t, null); return it ? readTI(it) : null; });
+  let off = IO_OFFSET[first.name] || 0;
+  await overwriteFrom(wantIn - off, o.out - off);
+  let done = await readNew();
+  for (let k = 0; k < 2 && done && Math.abs(done.inp - wantIn) > 0.004; k++) {
+    off += done.inp - wantIn;
+    IO_OFFSET[first.name] = off;
+    await overwriteFrom(wantIn - off, o.out - off);
+    done = await readNew();
   }
-  // the new piece: check it; the media's audio that came with the overwrite is removed again, so the
-  // camera audio tracks stay exactly as they were (uncut)
-  const done = await retryStale(async () => { const it = await findItem(track, t, null); return it ? readTI(it) : null; });
   if (!done || Math.abs(done.inp - wantIn) > 0.02) syncWarns.push(fmt(t));
-  try {
-    await removeWhere(project, seqNow, async (s) => (await s.getAudioTrack(at.index)).getTrackItems(ppro.Constants.TrackItemType.CLIP, false), ppro.Constants.MediaType.AUDIO, "AutoWed cut");
-  } catch (e) {
-    try {   // could not remove: keep it silent
-      const s = await seqNow();
-      await (await s.getAudioTrack(at.index)).setMute(true);
-    } catch (e2) {}
+  if (whole && first.off) {   // a recolored piece keeps its enable state
+    try { await retryStale(async () => { const it = await findItem(track, t, null); if (it) transact(project, "AutoWed cut", () => [it.createSetDisabledAction(true)]); }); } catch (e) {}
+  }
+  if (at.own) {
+    // linked audio piece: keep it off if the camera audio was off
+    if (at.disabled) {
+      try {
+        await retryStale(async () => {
+          const s = await seqNow();
+          for (const x of (await s.getAudioTrack(at.index)).getTrackItems(ppro.Constants.TrackItemType.CLIP, false)) {
+            if (Math.abs((await x.getStartTime()).seconds - t) < EPS * 4 && !(await x.isDisabled())) transact(project, "AutoWed cut", () => [x.createSetDisabledAction(true)]);
+          }
+        });
+      } catch (e) {}
+    }
+  } else {
+    // no in-sync camera audio here: the audio that came with the overwrite is removed again
+    try {
+      await removeWhere(project, seqNow, async (s) => (await s.getAudioTrack(at.index)).getTrackItems(ppro.Constants.TrackItemType.CLIP, false), ppro.Constants.MediaType.AUDIO, "AutoWed cut");
+    } catch (e) {
+      try { const s = await seqNow(); await (await s.getAudioTrack(at.index)).setMute(true); } catch (e2) {}
+    }
   }
   await breathe();
   return true;
@@ -671,6 +733,20 @@ function makeApplier(project, target, kind, cutTracks, trackOfCam, rangeT0, rang
     enabledUntil = processed;
   }
   return {
+    // the first piece of every clip in the range is still the original clip (no color): overwrite it whole
+    async recolor() {
+      if (!LABEL_OF_TRACK) return 0;
+      let n = 0;
+      for (const v of cutTracks) {
+        const starts = await retryStale(async () => (await itemsOf(async () => (await tgt()).getVideoTrack(v)))
+          .filter((x) => x.b > rangeT0 + EPS && x.a < rangeT1 - EPS && !done.has(x.a.toFixed(3))).map((x) => x.a));
+        for (const a of starts) {
+          if (a < rangeT0 - EPS) continue;           // a clip that starts before In keeps its own color
+          try { if (await emulatedRazor(project, await tgt(), v, a, true)) n++; } catch (e) {}
+        }
+      }
+      return n;
+    },
     async apply(segments, until, final) {
       const cuts = [rangeT0];
       for (let i = 1; i < segments.length; i++) cuts.push(segments[i].start);
@@ -907,7 +983,7 @@ async function runAutoEdit(jobOpts) {
   }
   const project = await ppro.Project.getActiveProject();
   sd.guid = sd.seq.guid.toString();
-  const kind = jobOpts.kind || $("etype").value;
+  const kind = "stacked";   // Multicam mode removed
   const range = [sd.inT, sd.outT];
   const event = jobOpts.event || $("event").value || "auto";
   const evName = eventName(event);
@@ -1049,6 +1125,7 @@ async function setupInPlace(project, sd, kind, range) {
     if (sd.cams.length < 2) { log("Manual cutting එකට කැමරා tracks 2ක් වත් ඕන (nest එකක් නෙවෙයි).", "bad"); return null; }
     cams = sd.cams;
     applier = makeApplier(project, sd.seq, "stacked", cams.map((c) => c.track), cams.map((c) => c.track), range[0], range[1]);
+    LABEL_OF_TRACK = tlColors ? Object.fromEntries(cams.map((c, i) => [c.track, CAM_LABEL_IDX[i % CAM_LABEL_IDX.length]])) : null;
     log(`"${sd.name}" timeline එකේ, ${fmt(range[0])} → ${fmt(range[1])} අතර cuts…`, "ok");
   } else {
     nest = sd.nestInRange;
@@ -1222,27 +1299,13 @@ async function finish(project, kind, sd, nest, nestInfo, applier, cams, result, 
       showProgress("done", 1, null);
       return;
     }
-    // camera colors: Premiere's API cannot set a timeline clip's label, so (like multicam angles) they
-    // are written into the saved project file: save, close for a few seconds, write, reopen
+    // camera colors were put on while cutting (project item label, see withLabel): no close/reopen
     await stabilizePieces(project, sd, cams, result, "stacked");
     let proj = project;
-    if (tlColors) try {
-      log("Camera colors දානවා: project එක save කරලා තත්පර කිහිපයකට close කරනවා…");
-      const path = project.path, seqName = sd.name;
-      await project.save();
-      const opts = ppro.CloseProjectOptions();
-      try { opts.setPromptIfDirty(false); opts.setShowCancelButton(false); } catch (e) {}
-      await project.close(opts);
-      let r;
-      try {
-        r = await call("POST", "/api/prproj/labels", { project_path: path, edit_seq: seqName,
-          cam_tracks: cams.map((c) => c.track), start: result.range[0], end: result.range[1] }, 120000);
-      } catch (e) { r = { error: String(e) }; }
-      proj = await ppro.Project.open(path);
-      try { const e = (await proj.getSequences()).find((x) => x.name === seqName); if (e) await proj.openSequence(e); } catch (e) {}
-      if (r.error) log("Camera colors දාන්න බැරි වුණා: " + r.error + " (edit එකට බලපෑමක් නැහැ)", "warn");
-      else log(`Camera colors දැම්මා: clips ${r.report.labeled} · Backup: ${r.backup}`, "ok");
-    } catch (e) { log("Camera colors: " + (e && e.message || e), "warn"); }
+    if (LABEL_OF_TRACK) {
+      try { const n = await applier.recolor(); log(`Camera colors දැම්මා (Premiere close නොකර)${n ? ` · clip මුල් ${n}` : ""}.`, "ok"); } catch (e) {}
+      LABEL_OF_TRACK = null;
+    }
     await importCopy(proj, result);
     showProgress("done", 1, null);
     log(`✔ ඉවරයි · cuts ${s.cuts} · සාමාන්‍ය shot ${s.avg_shot}s · angle මාරු කරන්න කෑල්ල select කරලා Shift+E.`, "ok");
@@ -1354,8 +1417,8 @@ setInterval(ping, 15000);
 // ---------- Claude debug bridge (MCP) ----------
 // When "Claude: ON", the panel asks the engine for commands that Claude sent through the AutoWed MCP
 // server (read the timeline, the log, run a test) and sends the answers back. Off by default.
-let tlColors = false;   // Manual cutting: also color the clips in the user's own timeline (needs a project close/reopen)
-try { tlColors = localStorage.getItem("autowed.tlcolors") === "1"; } catch (e) {}
+let tlColors = true;    // camera colors on the cut pieces (no project close any more)
+try { tlColors = localStorage.getItem("autowed.tlcolors2") !== "0"; } catch (e) {}
 function showTlColors() { const b = $("tlcol"); if (!b) return; b.textContent = tlColors ? "Timeline colors: ON" : "Timeline colors: OFF"; b.className = tlColors ? "on" : ""; }
 let bridgeOn = false;
 try { bridgeOn = localStorage.getItem("autowed.bridge") === "1"; } catch (e) {}
@@ -1460,9 +1523,9 @@ showBridge();
 bridgeLoop();
 if ($("tlcol")) $("tlcol").onclick = () => {
   tlColors = !tlColors;
-  try { localStorage.setItem("autowed.tlcolors", tlColors ? "1" : "0"); } catch (e) {}
+  try { localStorage.setItem("autowed.tlcolors2", tlColors ? "1" : "0"); } catch (e) {}
   showTlColors();
-  log(tlColors ? "Timeline colors ON: Manual cutting ඉවර වුණාම project එක තත්පර කිහිපයකට close වෙලා camera colors දානවා." : "Timeline colors OFF: colors copy sequence එකේ විතරයි, close/open නැහැ.", "mute");
+  log(tlColors ? "Timeline colors ON: cut කරන කෑලි වලට කැමරාවේ color එක (Premiere close වෙන්නේ නැහැ)." : "Timeline colors OFF.", "mute");
 };
 showTlColors();
 
@@ -1962,8 +2025,9 @@ function renderPills() {
   }
 }
 function renderKind() {
+  // Multicam mode is gone (it needed project close/reopen and did not work well): always Manual cutting
   const et = $("etype");
-  if (et.selectedIndex < 0) et.value = "multicam";
+  et.value = "stacked";
   for (const b of document.querySelectorAll("#kindseg .seg")) b.className = "seg" + (b.getAttribute("data-k") === et.value ? " on" : "");
   if ($("etypehint")) $("etypehint").textContent = HINTS[et.value] || "";
 }

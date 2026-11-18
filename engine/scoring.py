@@ -22,6 +22,7 @@ class ModeConfig:
     w_shake: float = 1.2
     w_pan: float = 0.6
     w_obstruct: float = 1.5
+    w_walk: float = 3.0            # someone passing right in front of the lens
     w_face: float = 1.2
     pan_limit: float = 0.30        # frame-widths per second before a pan counts as a whip
     shake_ref: float = 0.010       # jitter level that costs 1 point
@@ -99,6 +100,21 @@ def score_cameras(analysis: dict, cfg: ModeConfig, beat_period: float | None = N
     parts = []
     sig = max(1.0, 0.5 * fps)
 
+    # the widest camera: smallest faces (median face size where faces are seen; none seen = wide too)
+    # and the steadiest; dance / song items lean on it
+    wide_bias = np.zeros(C)
+    if getattr(cfg, "w_wide", 0.0) > 0 and C > 1:
+        size = []
+        for c in cams:
+            a = np.asarray(c.get("face_area", []), np.float64)
+            a = a[np.isfinite(a) & (a > 0)]
+            size.append(float(np.median(np.sqrt(a))) if a.size >= 5 else 0.0)
+        order = np.argsort(size)
+        if size[order[1]] - size[order[0]] > 0.01:          # a clear wide camera
+            wide_bias[order[0]] = cfg.w_wide
+            if C > 2:
+                wide_bias[order[1]] = 0.3 * cfg.w_wide
+
     for i, c in enumerate(cams):
         valid = np.isfinite(c["sharp"])
         if valid.sum() < 3:
@@ -134,6 +150,14 @@ def score_cameras(analysis: dict, cfg: ModeConfig, beat_period: float | None = N
                 + np.clip((med_s - sharp) / 0.35, 0, 2))
         obstruct = drop * np.clip(local / 0.06, 0.3, 1.5) * (pan < cfg.pan_limit)
 
+        # walk-by: a large foreground blob on a still camera; kept off a little before and after
+        if "walk" in c and np.isfinite(c["walk"]).any():
+            from scipy.ndimage import maximum_filter1d
+            wk = np.clip((_nan_fill(c["walk"]) - 0.18) / 0.2, 0, 1.5)
+            walk = maximum_filter1d(wk, max(1, int(1.0 * fps)))
+        else:
+            walk = np.zeros(N)
+
         nf, area = _nan_fill(c["faces"]), _nan_fill(c["face_area"])
         central = _nan_fill(c["face_central"])
         face = (nf > 0) * (0.35 + np.clip(np.sqrt(area) / 0.22, 0, 1) * (0.5 + 0.5 * central))
@@ -145,9 +169,10 @@ def score_cameras(analysis: dict, cfg: ModeConfig, beat_period: float | None = N
         smile = _nan_fill(c["smile"]) if "smile" in c and np.isfinite(c["smile"]).any() else np.zeros(N)
         smile = gaussian_filter1d(smile, sig)
 
-        bias = cfg.cam_bias[i] if i < len(cfg.cam_bias) else 0.0
+        bias = (cfg.cam_bias[i] if i < len(cfg.cam_bias) else 0.0) + wide_bias[i]
         total = (cfg.w_sharp * sharp_s - cfg.w_exposure * exposure - cfg.w_shake * shake
-                 - cfg.w_pan * pan_pen - cfg.w_obstruct * obstruct + cfg.w_face * face
+                 - cfg.w_pan * pan_pen - cfg.w_obstruct * obstruct - getattr(cfg, "w_walk", 3.0) * walk
+                 + cfg.w_face * face
                  + getattr(cfg, "w_couple", 0.0) * couple + getattr(cfg, "w_couple_id", 0.0) * cid
                  + getattr(cfg, "w_smile", 0.0) * smile + bias)
         total = uniform_filter1d(total, max(1, int(cfg.smooth_sec * fps)))
@@ -155,7 +180,7 @@ def score_cameras(analysis: dict, cfg: ModeConfig, beat_period: float | None = N
         total[over] = cfg.good_level + cfg.good_slope * (total[over] - cfg.good_level)
         total[~valid] = -1e3
         scores[i] = total
-        parts.append({"sharp": sharp_s, "exposure": exposure, "shake": shake, "pan": pan_pen,
+        parts.append({"walk": walk, "sharp": sharp_s, "exposure": exposure, "shake": shake, "pan": pan_pen,
                       "obstruct": obstruct, "face": face, "couple": couple, "rhythm": rhythm,
                       "smile": smile, "couple_id": cid,
                       "hug": _nan_fill(c["hug"]) if "hug" in c and np.isfinite(c["hug"]).any() else np.zeros(N)})
