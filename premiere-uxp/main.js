@@ -492,9 +492,48 @@ function reportSyncWarns() {
   syncWarns = [];
 }
 
+// A TrackItemSelection is only valid inside createEmptySelection's callback (Premiere 26.5: outside it
+// the remove action fails with "script object is no longer valid"), so the items are added and the
+// remove transaction runs inside the callback, on a sequence fetched just before.
+async function removeWhere(project, getSeq, pickItems, mediaType, label = "AutoWed") {
+  return retryStale(async () => {
+    const s = await getSeq();
+    const items = await pickItems(s);
+    if (!items.length) return 0;
+    let err = null, ok = false;
+    await new Promise((resolve) => {
+      const started = ppro.TrackItemSelection.createEmptySelection((sel) => {
+        try {
+          for (const it of items) sel.addItem(it, true);
+          ok = transact(project, label, () => [ppro.SequenceEditor.getEditor(s).createRemoveItemsAction(sel, false, mediaType)]);
+        } catch (e) { err = e; }
+        resolve();
+      });
+      if (started === false) { err = new Error("selection"); resolve(); }
+      setTimeout(resolve, 3000);
+    });
+    if (err) throw err;
+    return ok ? items.length : 0;
+  });
+}
 async function removeItems(project, seq, items, mediaType) {
-  const sel = await selectionOf(items);
-  transact(project, "AutoWed undo cut", () => [ppro.SequenceEditor.getEditor(seq).createRemoveItemsAction(sel, false, mediaType)]);
+  // items -> their windows, found again on the fresh sequence inside the selection callback
+  const wins = [];
+  for (const it of items) wins.push([(await it.getStartTime()).seconds, (await it.getEndTime()).seconds]);
+  const g = seq.guid.toString();
+  const audio = mediaType === ppro.Constants.MediaType.AUDIO;
+  return removeWhere(project, () => freshSeq(project, seq, g), async (s) => {
+    const out = [];
+    const n = audio ? await s.getAudioTrackCount() : await s.getVideoTrackCount();
+    for (let i = 0; i < n; i++) {
+      const tr = audio ? await s.getAudioTrack(i) : await s.getVideoTrack(i);
+      for (const x of tr.getTrackItems(ppro.Constants.TrackItemType.CLIP, false)) {
+        const a = (await x.getStartTime()).seconds, b = (await x.getEndTime()).seconds;
+        if (wins.some((w) => Math.abs(w[0] - a) < EPS && Math.abs(w[1] - b) < EPS)) out.push(x);
+      }
+    }
+    return out;
+  }, mediaType);
 }
 
 // Premiere 26.5 has no razor. A cut at t on a video track = overwrite the clip's own media, from the
@@ -505,23 +544,9 @@ async function removeItems(project, seq, items, mediaType) {
 // camera's own audio track when that clip sits there in sync (same content, so nothing changes), and
 // otherwise onto a spare muted track, disabled.
 let SPARE_AUDIO = {};
-async function audioTargetFor(project, seq, g, name, aStart, aIn, t) {
-  const s = await freshSeq(project, seq, g);
-  const n = await s.getAudioTrackCount();
-  for (let i = 0; i < n; i++) {
-    for (const x of (await s.getAudioTrack(i)).getTrackItems(ppro.Constants.TrackItemType.CLIP, false)) {
-      const a = (await x.getStartTime()).seconds, b = (await x.getEndTime()).seconds;
-      if (!(a < t - EPS && t + EPS < b)) continue;
-      let nm = ""; try { nm = await x.getName(); } catch (e) {}
-      const inp = (await x.getInPoint()).seconds;
-      if (nm === name && Math.abs((inp - a) - (aIn - aStart)) < 0.05) {
-        let off = false; try { off = await x.isDisabled(); } catch (e) {}
-        return { index: i, disabled: off, spare: false };
-      }
-    }
-  }
-  if (SPARE_AUDIO[g] == null) SPARE_AUDIO[g] = n;     // a new track after the last one
-  return { index: SPARE_AUDIO[g], disabled: true, spare: true };
+async function spareAudioIndex(project, seq, g) {
+  if (SPARE_AUDIO[g] == null) SPARE_AUDIO[g] = await (await freshSeq(project, seq, g)).getAudioTrackCount();
+  return SPARE_AUDIO[g];
 }
 async function emulatedRazor(project, seq, vIndex, t) {
   const g = seq.guid.toString();
@@ -534,7 +559,7 @@ async function emulatedRazor(project, seq, vIndex, t) {
     return { a: h.a, b: h.b, o: await readTI(h.it), raw: await h.it.getProjectItem(), name };
   });
   if (!first) return false;
-  const { a, b, o, raw, name } = first;
+  const { a, b, o, raw } = first;
   const rate = o.out > o.inp && b > a ? (o.out - o.inp) / (b - a) : 1;
   if (Math.abs(rate - 1) > 0.01) {   // speed-changed clips: an overwrite would play at 100%
     log(`V${vIndex + 1} ${fmt(t)}: speed වෙනස් කරපු clip එකක් cut කළේ නැහැ.`, "warn");
@@ -542,7 +567,7 @@ async function emulatedRazor(project, seq, vIndex, t) {
   }
   const pi = ppro.ClipProjectItem.cast(raw);
   const wantIn = o.inp + (t - a);
-  const at = await audioTargetFor(project, seq, g, name, a, o.inp, t);
+  const at = { index: await spareAudioIndex(project, seq, g) };
   let setIO = false;
   try {
     transact(project, "AutoWed cut", () => [pi.createSetInOutPointsAction(tt(wantIn), tt(o.out))]);
@@ -554,20 +579,17 @@ async function emulatedRazor(project, seq, vIndex, t) {
   } finally {
     if (setIO) { try { transact(project, "AutoWed cut", () => [pi.createClearInOutPointsAction()]); } catch (e) {} }
   }
-  // the new piece: check it, and keep its audio silent where the camera audio was off / spare
+  // the new piece: check it; the media's audio that came with the overwrite is removed again, so the
+  // camera audio tracks stay exactly as they were (uncut)
   const done = await retryStale(async () => { const it = await findItem(track, t, null); return it ? readTI(it) : null; });
   if (!done || Math.abs(done.inp - wantIn) > 0.02) syncWarns.push(fmt(t));
-  if (at.disabled) {
-    try {
-      await retryStale(async () => {
-        const s = await seqNow();
-        for (const x of (await s.getAudioTrack(at.index)).getTrackItems(ppro.Constants.TrackItemType.CLIP, false)) {
-          const xa = (await x.getStartTime()).seconds;
-          if (Math.abs(xa - t) < EPS * 4 && !(await x.isDisabled())) transact(project, "AutoWed cut", () => [x.createSetDisabledAction(true)]);
-        }
-        if (at.spare) { try { await (await s.getAudioTrack(at.index)).setMute(true); } catch (e) {} }
-      });
-    } catch (e) {}
+  try {
+    await removeWhere(project, seqNow, async (s) => (await s.getAudioTrack(at.index)).getTrackItems(ppro.Constants.TrackItemType.CLIP, false), ppro.Constants.MediaType.AUDIO, "AutoWed cut");
+  } catch (e) {
+    try {   // could not remove: keep it silent
+      const s = await seqNow();
+      await (await s.getAudioTrack(at.index)).setMute(true);
+    } catch (e2) {}
   }
   await breathe();
   return true;
@@ -796,11 +818,7 @@ async function nestInPlace(project, sd, range) {
       if (x.a >= range[0] - EPS && x.b <= range[1] + EPS) victims.push(x.it);
     }
   }
-  if (victims.length) {
-    const sel = await selectionOf(victims);
-    const o1 = await outer();
-    transact(project, "AutoWed nest", () => [ppro.SequenceEditor.getEditor(o1).createRemoveItemsAction(sel, false, ppro.Constants.MediaType.VIDEO)]);
-  }
+  if (victims.length) await removeItems(project, await outer(), victims, ppro.Constants.MediaType.VIDEO);
   // 3) drop the nest on the first camera track at In; its audio goes to a new track and is removed
   const vIdx = Math.min(...camTracks);
   const o2 = await outer();
@@ -808,15 +826,12 @@ async function nestInPlace(project, sd, range) {
   const nFresh = (await project.getSequences()).find((x) => x.guid.toString() === nGuid) || nseq;
   const nestItem = await nFresh.getProjectItem();
   transact(project, "AutoWed nest", () => [ppro.SequenceEditor.getEditor(o2).createOverwriteItemAction(nestItem, tt(range[0]), vIdx, aCount)]);
-  const extraAudio = [];
-  const o3 = await outer();
-  const aNow = await o3.getAudioTrackCount();
-  for (let i = aCount; i < aNow; i++) for (const x of await itemsOf(async () => (await outer()).getAudioTrack(i))) extraAudio.push(x.it);
-  if (extraAudio.length) {
-    const sel = await selectionOf(extraAudio);
-    const o4 = await outer();
-    transact(project, "AutoWed nest", () => [ppro.SequenceEditor.getEditor(o4).createRemoveItemsAction(sel, false, ppro.Constants.MediaType.AUDIO)]);
-  }
+  await removeWhere(project, outer, async (s) => {
+    const out = [];
+    const aNow = await s.getAudioTrackCount();
+    for (let i = aCount; i < aNow; i++) for (const x of (await s.getAudioTrack(i)).getTrackItems(ppro.Constants.TrackItemType.CLIP, false)) out.push(x);
+    return out;
+  }, ppro.Constants.MediaType.AUDIO, "AutoWed nest");
   sd.seq = await outer();
   const placed = (await itemsOf(async () => (await outer()).getVideoTrack(vIdx))).find((x) => Math.abs(x.a - range[0]) < 0.05);
   if (!placed) throw new Error("nest clip timeline එකට දාන්න බැරි වුණා");
