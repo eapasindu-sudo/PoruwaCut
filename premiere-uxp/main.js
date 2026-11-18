@@ -601,7 +601,9 @@ async function emulatedRazor(project, seq, vIndex, t, whole) {
   }
   const pi = ppro.ClipProjectItem.cast(raw);
   const wantIn = o.inp + (t - a);
-  const own = await ownAudioAt(project, seq, g, first.name, a, o.inp, t);
+  // camera audio stays uncut unless the editor chose linked cuts (Settings > Camera audio)
+  const linked = $("x_alink") && $("x_alink").value === "link";
+  const own = linked ? await ownAudioAt(project, seq, g, first.name, a, o.inp, t) : null;
   const at = own ? { index: own.index, own: true, disabled: own.disabled } : { index: await spareAudioIndex(project, seq, g) };
   // Some files (e.g. phones / action cams) place a project item's In/Out a few frames away from the
   // timeline clip's in-point (seen: 16 frames). The overwrite is checked against the clip, and redone
@@ -1925,7 +1927,7 @@ async function showStats() {
 }
 
 // studio presets: every panel setting, saved as a file others can copy (Documents\AutoWed Presets)
-const PRESET_IDS = ["event", "etype", "x_live", "x_audon", "min_shot", "max_shot", "stab", "stab_thr", "x_sil", "x_flash", "x_trim", "x_trans", "x_loud", "x_mic", "x_couple", "x_qc"];
+const PRESET_IDS = ["event", "etype", "x_live", "x_audon", "x_alink", "min_shot", "max_shot", "stab", "stab_thr", "x_sil", "x_flash", "x_trim", "x_trans", "x_loud", "x_mic", "x_couple", "x_qc"];
 let STUDIO = [];
 async function presetsRefresh(quiet) {
   try {
@@ -2080,4 +2082,10 @@ if ($("x_live")) {
 if ($("x_audon")) {
   try { const v = localStorage.getItem("autowed.audon"); if (v) $("x_audon").value = v; } catch (e) {}
   $("x_audon").addEventListener("change", () => { try { localStorage.setItem("autowed.audon", $("x_audon").value); } catch (e) {} });
+}
+
+// Camera audio cut / not cut is remembered
+if ($("x_alink")) {
+  try { const v = localStorage.getItem("autowed.alink"); if (v) $("x_alink").value = v; } catch (e) {}
+  $("x_alink").addEventListener("change", () => { try { localStorage.setItem("autowed.alink", $("x_alink").value); } catch (e) {} });
 }
