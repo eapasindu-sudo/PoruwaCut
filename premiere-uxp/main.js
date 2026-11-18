@@ -497,23 +497,31 @@ async function removeItems(project, seq, items, mediaType) {
   transact(project, "AutoWed undo cut", () => [ppro.SequenceEditor.getEditor(seq).createRemoveItemsAction(sel, false, mediaType)]);
 }
 
-// Premiere 26.5 has no razor, and its trims are real trims: moving a clip's start also moves its
-// in-point (and the other way round), so a piece can never be "slipped" into place. A cut at t is:
-//   1. clone the clip far to the right of the sequence (empty space, same content alignment + L)
-//   2. head-trim the clone to t+L      -> it now starts with the source frame of t
-//   3. tail-trim the original to t     -> original keeps [a, t]
-//   4. move the clone back by -L       -> clone fills [t, b], frame-exact
-// (verified on Premiere 26.5 against the source in-point). Nothing is deleted; only these 4 edits.
-const FAR = {};
-async function farOffset(project, seq, g) {
-  if (!FAR[g]) FAR[g] = Math.ceil((await (await freshSeq(project, seq, g)).getEndTime()).seconds + 120);
-  return FAR[g];
-}
-async function findItem(track, a, b) {
-  for (const x of await itemsOf(track)) {
-    if (Math.abs(x.a - a) < EPS * 4 && (b == null || Math.abs(x.b - b) < EPS * 4)) return x.it;
+// Premiere 26.5 has no razor. A cut at t on a video track = overwrite the clip's own media, from the
+// source frame of t to the clip's out point, at t on the same track (the project item's In/Out are set
+// for that and cleared after). Premiere does the edit itself, so the track's clip list stays in order.
+// (Earlier ways - clone far right and move back - left the list out of order and Premiere 26 then
+// stopped drawing the track's clips.) The overwrite also brings the media's audio: it goes onto the
+// camera's own audio track when that clip sits there in sync (same content, so nothing changes), and
+// otherwise onto a spare muted track, disabled.
+let SPARE_AUDIO = {};
+async function audioTargetFor(project, seq, g, name, aStart, aIn, t) {
+  const s = await freshSeq(project, seq, g);
+  const n = await s.getAudioTrackCount();
+  for (let i = 0; i < n; i++) {
+    for (const x of (await s.getAudioTrack(i)).getTrackItems(ppro.Constants.TrackItemType.CLIP, false)) {
+      const a = (await x.getStartTime()).seconds, b = (await x.getEndTime()).seconds;
+      if (!(a < t - EPS && t + EPS < b)) continue;
+      let nm = ""; try { nm = await x.getName(); } catch (e) {}
+      const inp = (await x.getInPoint()).seconds;
+      if (nm === name && Math.abs((inp - a) - (aIn - aStart)) < 0.05) {
+        let off = false; try { off = await x.isDisabled(); } catch (e) {}
+        return { index: i, disabled: off, spare: false };
+      }
+    }
   }
-  return null;
+  if (SPARE_AUDIO[g] == null) SPARE_AUDIO[g] = n;     // a new track after the last one
+  return { index: SPARE_AUDIO[g], disabled: true, spare: true };
 }
 async function emulatedRazor(project, seq, vIndex, t) {
   const g = seq.guid.toString();
@@ -521,57 +529,54 @@ async function emulatedRazor(project, seq, vIndex, t) {
   const track = async () => (await seqNow()).getVideoTrack(vIndex);
   const first = await retryStale(async () => {
     const h = (await itemsOf(track)).find((x) => x.a < t - EPS && t + EPS < x.b);
-    return h ? { a: h.a, b: h.b, o: await readTI(h.it) } : null;
+    if (!h) return null;
+    let name = ""; try { name = await h.it.getName(); } catch (e) {}
+    return { a: h.a, b: h.b, o: await readTI(h.it), raw: await h.it.getProjectItem(), name };
   });
   if (!first) return false;
-  const { a, b, o } = first;
-  const rate = o.out > o.inp && b > a ? (o.out - o.inp) / (b - a) : 1;   // source seconds per timeline second
-  const wantIn = o.inp + (t - a) * rate;
-  const L = await farOffset(project, seq, g);
-  const act = (name, getIt, mk) => retryStale(async () => {
-    const it = await getIt();
-    if (!it) throw new Error(name + ": clip not found");
-    transact(project, "AutoWed cut", () => [mk(it)]);
-  });
-  let cloned = false, trimmed = false;
-  try {
-    // 1. clone far right
-    await act("clone", () => findItem(track, a, b), (it) => ppro.SequenceEditor.getEditor(seqNowSync()).createCloneTrackItemAction(it, tt(L), 0, 0, true, false));
-    cloned = true;
-    // 2. head-trim the clone to t+L (if this Premiere slips instead of trimming, fix the in-point)
-    await act("trim clone", () => findItem(track, a + L, b + L), (it) => it.createSetStartAction(tt(t + L)));
-    let c = await retryStale(async () => { const it = await findItem(track, t + L, b + L); return it ? readTI(it) : null; });
-    if (!c) throw new Error("clone trim");
-    if (Math.abs(c.inp - wantIn) > 0.02) {
-      await act("in clone", () => findItem(track, t + L, b + L), (it) => it.createSetInPointAction(tt(wantIn)));
-    }
-    // 3. tail-trim the original
-    await act("trim original", () => findItem(track, a, b), (it) => it.createSetEndAction(tt(t)));
-    trimmed = true;
-    // 4. move the clone back into the gap
-    await act("move back", () => findItem(track, t + L, b + L), (it) => it.createMoveAction(tt(-L)));
-    const done = await retryStale(async () => { const it = await findItem(track, t, b); return it ? readTI(it) : null; });
-    if (!done) throw new Error("piece not in place");
-    if (Math.abs(done.inp - wantIn) > 0.02) syncWarns.push(fmt(t));
-    await breathe();
-  } catch (e) {
-    // put this clip back exactly as it was: remove the far clone, give the original its end back
-    try {
-      const far = await retryStale(async () => (await itemsOf(track)).filter((x) => x.a > L - 1));
-      if (far.length) await removeItems(project, await seqNow(), far.map((x) => x.it), ppro.Constants.MediaType.VIDEO);
-      if (trimmed) {
-        const back = await retryStale(async () => (await itemsOf(track)).find((x) => Math.abs(x.b - b) < EPS * 4 && x.a > a + EPS));
-        if (back) await removeItems(project, await seqNow(), [back.it], ppro.Constants.MediaType.VIDEO);
-        await act("restore", () => findItem(track, a, t), (it) => it.createSetEndAction(tt(b)));
-      }
-      log(`Cut ${fmt(t)} ආපස්සට හැරෙව්වා: clip එක කලින් තිබුණු විදිහටම තියෙනවා.`, "warn");
-    } catch (e2) {
-      log(`⚠ Cut ${fmt(t)} ආපස්සට හරවන්න බැරි වුණා (V${vIndex + 1}). Ctrl+Z එකෙන් "AutoWed cut" ආපස්සට ගන්න.`, "bad");
-    }
-    throw e;
+  const { a, b, o, raw, name } = first;
+  const rate = o.out > o.inp && b > a ? (o.out - o.inp) / (b - a) : 1;
+  if (Math.abs(rate - 1) > 0.01) {   // speed-changed clips: an overwrite would play at 100%
+    log(`V${vIndex + 1} ${fmt(t)}: speed වෙනස් කරපු clip එකක් cut කළේ නැහැ.`, "warn");
+    return false;
   }
+  const pi = ppro.ClipProjectItem.cast(raw);
+  const wantIn = o.inp + (t - a);
+  const at = await audioTargetFor(project, seq, g, name, a, o.inp, t);
+  let setIO = false;
+  try {
+    transact(project, "AutoWed cut", () => [pi.createSetInOutPointsAction(tt(wantIn), tt(o.out))]);
+    setIO = true;
+    await retryStale(async () => {
+      const s = await seqNow();
+      transact(project, "AutoWed cut", () => [ppro.SequenceEditor.getEditor(s).createOverwriteItemAction(raw, tt(t), vIndex, at.index)]);
+    });
+  } finally {
+    if (setIO) { try { transact(project, "AutoWed cut", () => [pi.createClearInOutPointsAction()]); } catch (e) {} }
+  }
+  // the new piece: check it, and keep its audio silent where the camera audio was off / spare
+  const done = await retryStale(async () => { const it = await findItem(track, t, null); return it ? readTI(it) : null; });
+  if (!done || Math.abs(done.inp - wantIn) > 0.02) syncWarns.push(fmt(t));
+  if (at.disabled) {
+    try {
+      await retryStale(async () => {
+        const s = await seqNow();
+        for (const x of (await s.getAudioTrack(at.index)).getTrackItems(ppro.Constants.TrackItemType.CLIP, false)) {
+          const xa = (await x.getStartTime()).seconds;
+          if (Math.abs(xa - t) < EPS * 4 && !(await x.isDisabled())) transact(project, "AutoWed cut", () => [x.createSetDisabledAction(true)]);
+        }
+        if (at.spare) { try { await (await s.getAudioTrack(at.index)).setMute(true); } catch (e) {} }
+      });
+    } catch (e) {}
+  }
+  await breathe();
   return true;
-  function seqNowSync() { return seq; }
+}
+async function findItem(track, a, b) {
+  for (const x of await itemsOf(track)) {
+    if (Math.abs(x.a - a) < EPS * 4 && (b == null || Math.abs(x.b - b) < EPS * 4)) return x.it;
+  }
+  return null;
 }
 
 async function razorTracks(project, seq, tracks, t, native) {
@@ -1049,6 +1054,21 @@ async function setupInPlace(project, sd, kind, range) {
 // Default output. Premiere 26 cannot import an FCP XML with more than ~25 clips, so the new timeline is
 // a copy of the editor's sequence made by Premiere itself; the cuts go into that copy in calm batches
 // after the analysis (project saved first). The editor's own timeline is never touched.
+
+// Premiere 26 does not repaint the timeline after many scripted edits (clips show only under the mouse):
+// switching to another sequence and back forces a full redraw.
+async function repaintTimeline(project, guid) {
+  try {
+    const all = await project.getSequences();
+    const me = all.find((x) => x.guid.toString() === guid);
+    const other = all.find((x) => x.guid.toString() !== guid);
+    if (!me) return;
+    if (other) { await project.openSequence(other); await sleep(500); }
+    const again = (await project.getSequences()).find((x) => x.guid.toString() === guid) || me;
+    await project.openSequence(again);
+  } catch (e) {}
+}
+
 let PEND_ORIG = null;
 // the new timeline = a Premiere subsequence of In..Out (only the clips in the range, all tracks, starting
 // at 00:00). The editor's own timeline is not edited (its In/Out are put back if a batch range needed others).
@@ -1168,6 +1188,7 @@ async function finish(project, kind, sd, nest, nestInfo, applier, cams, result, 
       catch (e2) { log("Timeline cut: " + (e2 && e2.message || e2), "bad"); applier = null; }
     }
   }
+  if (applier) await repaintTimeline(project, sd.guid);
   if (calm) {
     CALM = false; CALM_TOTAL = 0;
     if (applier) try { localStorage.removeItem("autowed.pending"); } catch (e) {}

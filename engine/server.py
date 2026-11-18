@@ -377,7 +377,7 @@ def api(method: str, path: str, body: dict | None = None):
             return 200, _learned()
     elif method == "POST":
         if path == "/api/update/install":
-            if LOCK.locked():
+            if any(j.get("status") in ("queued", "running") for j in JOBS.values()):
                 return 409, {"status": "error", "message": "Edit එකක් run වෙනවා. ඉවර වුණාම update කරන්න."}
             return 200, dict(updater.start_install(close_premiere=bool(body.get("close_premiere")),
                                                    reopen=body.get("reopen")))
