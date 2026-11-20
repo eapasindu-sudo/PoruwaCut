@@ -88,7 +88,7 @@ def detect_beats(audio: np.ndarray, sr: int = SR, segment_sec: float = 60.0, pro
     return beats, tempos, strength
 
 
-def split_songs(audio: np.ndarray, sr: int = SR, min_song: float = 15.0) -> list[tuple[float, float]]:
+def split_songs(audio: np.ndarray, sr: int = SR, min_song: float = 25.0) -> list[tuple[float, float]]:
     """One audio track often holds several songs (a dance medley, songs one after another). Song
     boundaries: a quiet gap (>= 0.4 s well below the music level) or a lasting change of tempo."""
     n = len(audio)

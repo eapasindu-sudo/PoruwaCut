@@ -198,15 +198,21 @@ def run(project: dict, event: str = "auto", out_dir: str = "out", overrides: dic
     ph = (np.zeros(0), np.zeros(0))
     if len(audio) > beatmod.SR * 2 and np.abs(audio).max() > 0:
         if preset.grid in ("beats", "auto"):
-            # song by song: each song its own tempo, bars and phrases
-            b, strength, songs = beatmod.detect_beats_songs(audio, progress=lambda f: prog("audio", 0.5 + 0.3 * f))
+            # dance / songs: song by song (each song its own tempo, bars and phrases); other events
+            # (speech, ambience with some music) keep one beat track - splitting them gives nonsense
+            if preset.grid == "beats":
+                b, strength, songs = beatmod.detect_beats_songs(audio, progress=lambda f: prog("audio", 0.5 + 0.3 * f))
+            else:
+                b, _tempos, strength = beatmod.detect_beats(audio, progress=lambda f: prog("audio", 0.5 + 0.3 * f))
+                songs = []
             beats = b + t0
             dbeats = np.concatenate([beatmod.downbeats(beats[(beats >= s["start"] + t0) & (beats < s["end"] + t0)],
                                                        strength[(beats >= s["start"] + t0) & (beats < s["end"] + t0)])
                                      for s in songs]) if songs and len(beats) else beatmod.downbeats(beats, strength)
             if len(songs) > 1:
+                shown = [s for s in songs if s["bpm"] > 0][:8]
                 log("  සින්දු " + str(len(songs)) + ": " + ", ".join(
-                    f"{fmt_t(s['start'] + t0)} ~{s['bpm']:.0f} BPM" for s in songs if s["bpm"] > 0))
+                    f"{fmt_t(s['start'] + t0)} ~{s['bpm']:.0f} BPM" for s in shown) + (" …" if len(songs) > 8 else ""))
             if len(b) > 2:
                 beat_period = float(np.median(np.diff(b)))
             if getattr(preset, "roll_cuts", False):

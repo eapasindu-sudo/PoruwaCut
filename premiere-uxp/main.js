@@ -1630,7 +1630,12 @@ $("updbtn").addEventListener("click", () => installUpdate());
 $("chk").addEventListener("click", () => checkUpdate(true));
 $("read").addEventListener("click", () => readSequence().catch((e) => log("Error: " + e, "bad")));
 $("rtest").addEventListener("click", () => razorTest());
-$("go").addEventListener("click", () => autoEdit());
+// the footer button: on the Batch page it runs the list, everywhere else one Auto Edit
+$("go").addEventListener("click", () => {
+  if (CUR_TAB === "batch") { showTab("edit"); return qRun(); }
+  showTab("edit");
+  return autoEdit();
+});
 $("ver").textContent = "AutoWed v" + PANEL_VERSION;
 ping().then((ok) => { if (ok) checkUpdate(false); });
 setInterval(ping, 15000);
@@ -1900,8 +1905,12 @@ async function qAddInOut() {
   if (!seq) { log("Active sequence එකක් නැහැ.", "bad"); return; }
   const inT = (await seq.getInPoint()).seconds, outT = (await seq.getOutPoint()).seconds, endT = (await seq.getEndTime()).seconds;
   if (!(outT > inT + 0.5) || (inT < 0.01 && Math.abs(outT - endT) < 0.05)) { log("ලිස්ට් එකට දාන්න කලින් In (I) සහ Out (O) දාන්න.", "bad"); return; }
-  QUEUE.push({ seqGuid: seq.guid.toString(), seqName: seq.name, range: [inT, outT], event: $("event").value || "auto", kind: $("etype").value, status: "" });
-  qSave(); qRender();
+  const ev = $("event").value || "auto";
+  const dup = QUEUE.find((q) => q.seqGuid === seq.guid.toString() && q.status !== "done" &&
+                               Math.abs(q.range[0] - inT) < 0.5 && Math.abs(q.range[1] - outT) < 0.5);
+  if (dup) { log(`මේ කොටස (${fmt(inT)} → ${fmt(outT)}) දැනටමත් ලිස්ට් එකේ තියෙනවා.`, "warn"); return; }
+  QUEUE.push({ seqGuid: seq.guid.toString(), seqName: seq.name, range: [inT, outT], event: ev, kind: $("etype").value, status: "" });
+  qSave(); qRender(); goLabel();
   log(`ලිස්ට් එකට දැම්මා: ${seq.name} · ${fmt(inT)} → ${fmt(outT)} · ${eventName($("event").value)}`, "ok");
 }
 
@@ -1927,7 +1936,7 @@ async function qRun() {
         await sleep(400);
         ok = await runAutoEdit({ range: q.range, event: q.event, kind: q.kind });
       } catch (e) { log("Batch: " + (e && e.message || e), "bad"); }
-      q.status = ok ? "done" : "error"; qSave(); qRender();
+      q.status = ok ? "done" : "error"; qSave(); qRender(); goLabel();
       if (!STOPPING) notifyPhone(ok ? `✔ ${eventName(q.event)} (${n}/${todo.length})` : `✖ ${eventName(q.event)} (${n}/${todo.length})`,
         ok ? (LAST_DONE || "edit එක ඉවරයි") : (LAST_BAD || "Log එක බලන්න"), ok ? "white_check_mark" : "warning");
     }
@@ -2229,7 +2238,15 @@ const TABS = {
   sync: ["STEP 0 · SYNC", "Sync by audio"], seq: ["STEP 1 · SEQUENCE", "Sequence"], edit: ["STEP 2 · EDIT", "Auto Edit"],
   batch: ["STEP 3 · BATCH", "Wedding list"], set: ["SETTINGS", "Settings"], log: ["LOG", "Log"],
 };
+let CUR_TAB = "edit";
+function goLabel() {
+  if (!$("go")) return;
+  const left = QUEUE.filter((q) => q.status !== "done").length;
+  $("go").textContent = CUR_TAB === "batch" ? `ලිස්ට් එක Edit කරන්න (${left})` : "Auto Edit";
+}
 function showTab(t) {
+  CUR_TAB = t;
+  goLabel();
   for (const b of document.querySelectorAll(".rbtn")) b.className = "rbtn" + (b.getAttribute("data-tab") === t ? " on" : "");
   for (const p of document.querySelectorAll(".pane")) p.className = "pane" + (p.id === "p_" + t ? " on" : "");
   const h = TABS[t] || ["", ""];
@@ -2291,7 +2308,6 @@ function renderMoments(result) {
 
 // move to the page that shows what is running
 (function wrapForTabs() {
-  const g = $("go").onclick; $("go").onclick = () => { showTab("edit"); return g && g(); };
   const sy = $("sync").onclick; $("sync").onclick = () => { showTab("sync"); return sy && sy(); };
   const qr = $("qrun").onclick; $("qrun").onclick = () => { showTab("edit"); return qr && qr(); };
 })();
