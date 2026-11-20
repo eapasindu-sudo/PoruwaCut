@@ -27,6 +27,7 @@ class EventPreset:
     w_shake: float = 1.2
     w_pan: float = 0.6
     w_obstruct: float = 1.5
+    w_walk: float = 3.0           # someone passing right in front of the lens
     w_face: float = 1.0
     w_couple: float = 1.0         # the couple framed in the centre
     w_couple_id: float = 0.7      # the bride / groom recognised in the shot (face recognition)
@@ -58,7 +59,9 @@ class EventPreset:
 _DANCE = dict(grid="beats", min_shot=1.2, max_shot=5.0, switch_cost=0.4, stay_cost=1.3, roll_cuts=True,
               w_shake=1.4, w_pan=0.1, shake_ref=0.016, pan_limit=1.5, rhythm_forgive=0.6,
               w_face=0.25, w_couple=0.3, w_couple_id=0.15, w_smile=0.1, w_wide=0.6,
-              smooth_sec=0.4, dead_threshold=-1.6, dead_min_sec=1.5)
+              smooth_sec=0.4, dead_threshold=-2.2, dead_min_sec=2.5,
+              # a dance floor is full of people moving through the frame: that is the item, not a walk-by
+              w_walk=0.6, w_obstruct=0.8)
 _CALM = dict(grid="phrases", analysis_fps=4.0, min_shot=3.0, max_shot=10.0, switch_cost=0.9, stay_cost=2.0,
              w_shake=1.4, w_face=1.2, w_couple=1.4)
 

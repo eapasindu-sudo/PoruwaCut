@@ -110,14 +110,21 @@ def _moments(mix16, t0, times, parts, segs, max_n: int = 25):
     return sorted(out, key=lambda d: d["time"])
 
 
-def _weak_takes(times, parts, project, min_len: float = 3.0):
-    """Per camera stretches that are blurred, too dark / blown out or very shaky (QC markers)."""
+def _weak_takes(times, parts, project, min_len: float = 3.0, segments=None, dance: bool = False):
+    """Per camera stretches that are blurred, too dark / blown out or very shaky (QC markers).
+    Only where that camera is actually in the edit (segments). Dance: movement, pans and people
+    crossing are the event itself, so only blur / exposure, and only longer stretches."""
     out = []
+    tests = [("sharp", "blur / focus", lambda v: v < -1.6), ("exposure", "exposure", lambda v: v > 1.5)]
+    if dance:
+        min_len = max(min_len, 5.0)
+    else:
+        tests += [("shake", "jerk / shake", lambda v: v > 2.5), ("pan", "jerk (ඉක්මන් pan)", lambda v: v > 1.0),
+                  ("walk", "කෙනෙක් ඉස්සරහින් යනවා", lambda v: v > 0.6)]
     for c, p in enumerate(parts):
         if not p:
             continue
-        for key, why, test in (("sharp", "blur / focus", lambda v: v < -1.6), ("exposure", "exposure", lambda v: v > 1.5),
-                               ("shake", "jerk / shake", lambda v: v > 2.5), ("pan", "jerk (ඉක්මන් pan)", lambda v: v > 1.0), ("walk", "කෙනෙක් ඉස්සරහින් යනවා", lambda v: v > 0.8)):
+        for key, why, test in tests:
             ml = 0.8 if key == "walk" else min_len
             v = p.get(key)
             if v is None:
@@ -129,7 +136,10 @@ def _weak_takes(times, parts, project, min_len: float = 3.0):
                     j = i
                     while j < len(bad) and bad[j]:
                         j += 1
-                    if j - i >= 2 and times[min(j, len(times) - 1)] - times[i] >= ml:
+                    a_t, b_t = float(times[i]), float(times[min(j, len(times) - 1)])
+                    used = segments is None or any(sg["cam"] == c and min(sg["end"], b_t) - max(sg["start"], a_t) > 0.5
+                                                   for sg in segments)
+                    if j - i >= 2 and b_t - a_t >= ml and used:
                         out.append({"cam": c, "name": project["cameras"][c]["name"], "why": why,
                                     "start": round(float(times[i]), 2), "end": round(float(times[min(j, len(times) - 1)]), 2)})
                     i = j
@@ -294,9 +304,30 @@ def run(project: dict, event: str = "auto", out_dir: str = "out", overrides: dic
     detectors = set()
     times = np.zeros(0)
     scores = np.zeros((C, 0))
+    # look-ahead: while one window is scored and cut, the next windows are already being analysed
+    # (fills the chunk cache; analyze_file waits for a chunk another thread is on, never does it twice)
+    from concurrent.futures import ThreadPoolExecutor as _TPE
+    cores = os.cpu_count() or 4
+    ahead = 2 if cores >= 8 else (1 if cores >= 4 else 0)
+    try:
+        ahead = int(os.environ.get("AUTOWED_LOOKAHEAD", ahead))
+    except ValueError:
+        pass
+    pre = _TPE(max_workers=ahead) if ahead and len(wins) > 1 else None
+    queued = set()
+
+    def _prefetch(k):
+        if pre is None or k >= len(wins) or k in queued:
+            return
+        queued.add(k)
+        a = wins[k]
+        pre.submit(lambda a=a: analyze_cameras(project["cameras"], a, min(t1, a + window), analysis_fps, cache_dir,
+                                               use_gpu, workers, log=lambda m: None, progress=None))
     for wi, w0 in enumerate(wins):
         w1 = min(t1, w0 + window)
         final = wi == len(wins) - 1
+        for k in range(wi + 1, wi + 1 + ahead):
+            _prefetch(k)
         an = analyze_cameras(project["cameras"], w0, w1, analysis_fps, cache_dir, use_gpu, workers,
                              log=lambda m: None,
                              progress=lambda f, wi=wi: prog("analysis", (wi + f) / len(wins)))
@@ -335,7 +366,10 @@ def run(project: dict, event: str = "auto", out_dir: str = "out", overrides: dic
                 on_segments([dict(s) for s in committed], commit_t)
         log(f"  {(w1 - t0) / 60:.1f}/{(t1 - t0) / 60:.1f} min: cuts {max(0, len(committed) - 1)}")
     from .media import decode_mode
-    log(f"  face detector: {', '.join(sorted(detectors))} · decode: {decode_mode()} · fps {analysis_fps:g} · parallel {workers}")
+    if pre is not None:
+        pre.shutdown(wait=False, cancel_futures=True)
+    log(f"  face detector: {', '.join(sorted(detectors))} · decode: {decode_mode()} · fps {analysis_fps:g} · parallel {workers}"
+        + (f" · look-ahead {ahead}" if pre is not None else ""))
 
     # ---- weak stretches (all cameras poor) -------------------------------------------------
     prog("cuts", 0.0)
@@ -370,7 +404,7 @@ def run(project: dict, event: str = "auto", out_dir: str = "out", overrides: dic
         qc = run_qc(project, t0, t1, preset.id, mix16, dead, bool(ex.get("silence")), False,
                      silence_min=float(ex.get("silence_min") or 0.9))
         qc["moments"] = _moments(mix16, t0, times, _parts, final_segs)
-        qc["bad"] = _weak_takes(times, _parts, project)
+        qc["bad"] = _weak_takes(times, _parts, project, segments=final_segs, dance=preset.grid == "beats")
         qc["jumps"] = _jump_cuts(times, analysis, final_segs)
     except Exception as e:  # noqa: BLE001
         log(f"  checks මඟ හැරියා: {e}")

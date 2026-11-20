@@ -165,7 +165,7 @@ def score_cameras(analysis: dict, cfg: ModeConfig, beat_period: float | None = N
         # walk-by: a large foreground blob on a still camera; kept off a little before and after
         if "walk" in c and np.isfinite(c["walk"]).any():
             from scipy.ndimage import maximum_filter1d
-            wk = np.clip((_nan_fill(c["walk"]) - 0.18) / 0.2, 0, 1.5)
+            wk = np.clip((_nan_fill(c["walk"]) - 0.15) / 0.15, 0, 1.5)
             walk = maximum_filter1d(wk, max(1, int(1.0 * fps)))
         else:
             walk = np.zeros(N)

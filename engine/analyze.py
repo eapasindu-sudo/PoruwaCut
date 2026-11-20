@@ -22,7 +22,7 @@ METRICS = ["sharp", "bright", "clip_hi", "clip_lo", "dx", "dy", "phase_resp",
 
 ANALYSIS_WIDTH = 480
 SMALL_WIDTH = 160
-VERSION = "6"
+VERSION = "7"
 # the couple's face embeddings (found by find_couple before the analysis), used for the "couple" metric
 COUPLE = {"centroids": None, "key": ""}
 
@@ -88,7 +88,10 @@ def _analyze_chunk(path: str, start: float, length: float, fps: float, use_gpu: 
             out["local_change"][k] = float(np.abs(warped[4:-4, 4:-4] - small[4:-4, 4:-4]).mean() / 255.0)
         # walk-by: a big blob that differs from this camera's background while the camera holds still
         # (photographer / videographer / guest passing right in front of the lens)
-        moving = prev_small is not None and abs(out["dx"][k] * SMALL_WIDTH) + abs(out["dy"][k] * SMALL_WIDTH) > 1.5
+        # a camera move needs a confident phase match; while something big is crossing the frame the
+        # match gets weak and jumps (the blob itself "moves"): that is not the camera, keep the background
+        shift = abs(out["dx"][k] * SMALL_WIDTH) + abs(out["dy"][k] * SMALL_WIDTH) if prev_small is not None else 0.0
+        moving = prev_small is not None and shift > 1.5 and (bg_busy == 0 or out["phase_resp"][k] >= 0.35)
         if bg is None or moving or bg_age < 3:
             bg = small.copy() if (bg is None or moving) else 0.5 * bg + 0.5 * small
             bg_busy = 0
@@ -159,6 +162,11 @@ def _analyze_chunk(path: str, start: float, length: float, fps: float, use_gpu: 
     return out
 
 
+import threading as _threading
+_INFLIGHT: dict = {}            # cache path -> Event while some thread analyses that chunk
+_INFLIGHT_LK = _threading.Lock()
+
+
 def analyze_file(path: str, f_start: float, f_end: float, fps: float, cache_dir: str,
                  chunk_len: float = CHUNK_LEN, use_gpu: bool = True, progress=None, tick=None) -> dict:
     """Metrics on grid times j/fps for f_start <= j/fps < f_end (file time)."""
@@ -178,6 +186,18 @@ def analyze_file(path: str, f_start: float, f_end: float, fps: float, cache_dir:
             break
         cp = _cache_path(cache_dir, path, cs, chunk_len, fps)
         d = None
+        # another thread (look-ahead) already analysing this chunk: wait for it instead of doing it twice
+        while True:
+            with _INFLIGHT_LK:
+                ev = _INFLIGHT.get(cp)
+                if ev is None and not os.path.exists(cp):
+                    mine = _threading.Event()
+                    _INFLIGHT[cp] = mine
+                    break
+                if ev is None:
+                    mine = None
+                    break
+            ev.wait(600)
         if os.path.exists(cp):
             try:
                 d = dict(np.load(cp))
@@ -189,14 +209,20 @@ def analyze_file(path: str, f_start: float, f_end: float, fps: float, cache_dir:
                     os.remove(cp)
                 except OSError:
                     pass
-        if d is None:
-            d = _analyze_chunk(path, cs, cl, fps, use_gpu, tick)
-            tmp = cp + ".part.npz"
-            try:
-                np.savez_compressed(tmp, **d)
-                os.replace(tmp, cp)      # atomic: a crash never leaves a broken cache file
-            except OSError:
-                pass
+        try:
+            if d is None:
+                d = _analyze_chunk(path, cs, cl, fps, use_gpu, tick)
+                tmp = cp + ".part.npz"
+                try:
+                    np.savez_compressed(tmp, **d)
+                    os.replace(tmp, cp)      # atomic: a crash never leaves a broken cache file
+                except OSError:
+                    pass
+        finally:
+            if mine is not None:
+                with _INFLIGHT_LK:
+                    _INFLIGHT.pop(cp, None)
+                mine.set()
         parts.append((ci, d))
         if progress:
             progress(path, ci - c0 + 1, c1 - c0)

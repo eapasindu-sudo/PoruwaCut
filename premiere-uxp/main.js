@@ -158,9 +158,13 @@ async function loadEvents() {
 
 async function checkUpdate(manual) {
   try {
-    const u = await call("GET", manual ? "/api/update?force=1" : "/api/update");
+    if (manual) log("Update තියෙනවද බලනවා…", "mute");
+    // GitHub can be slow on a weak connection: give it time (the default 8 s timed out quietly)
+    const u = await call("GET", manual ? "/api/update?force=1" : "/api/update", null, 45000);
     if (u.available) {
       $("upd").style.display = "block";
+      if (manual) log(`අලුත් version එකක් තියෙනවා: v${u.latest}. උඩ තියෙන "Update කරන්න" ඔබන්න.`, "ok");
+      try { $("upd").scrollIntoView && $("upd").scrollIntoView(); } catch (e) {}
       $("updtxt").textContent = `අලුත් version එකක්: v${u.latest} (දැන් v${u.current})`;
       $("updnotes").textContent = (u.notes || "").split("\n").slice(0, 4).join("\n");
     } else if (manual) {
@@ -170,33 +174,41 @@ async function checkUpdate(manual) {
 }
 
 async function installUpdate() {
+  // Premiere stays open: closing it from outside did not always work (then nothing got installed and
+  // the engine was left stopped). The installer updates the engine (it starts again by itself) and the
+  // panel files; the new panel loads the next time Premiere opens.
   $("updbtn").disabled = true;
-  // save the open project first: the update closes Premiere and opens it again afterwards
-  let reopen = "";
   try {
     const project = await ppro.Project.getActiveProject();
-    if (project) {
-      const ok = await project.save();
-      reopen = project.path || "";
-      log(ok ? "Project එක save කළා ✔" : "Project save වුණේ නැද්ද කියලා සැකයි", ok ? "ok" : "warn");
-    }
+    if (project) { const ok = await project.save(); log(ok ? "Project එක save කළා ✔" : "Project save වුණේ නැද්ද කියලා සැකයි", ok ? "ok" : "warn"); }
   } catch (e) { log("Save: " + e, "warn"); }
   try {
-    const r = await call("POST", "/api/update/install", { close_premiere: true, reopen });
+    const r = await call("POST", "/api/update/install", { close_premiere: false }, 45000);
     if (r.status === "error") { log(r.message, "bad"); $("updbtn").disabled = false; return; }
   } catch (e) { log("Update පටන් ගන්න බැරි වුණා: " + e, "bad"); $("updbtn").disabled = false; return; }
+  let gone = 0;
   const poll = async () => {
     let s;
     try { s = await call("GET", "/api/update/status", null, 3000); }
     catch (e) {
-      $("updtxt").textContent = "Update install වෙනවා... විනාඩියකින් Premiere restart කරන්න.";
+      // engine is being replaced; wait for the new one
+      gone++;
+      $("updtxt").textContent = "Update install වෙනවා... (Premiere close කරන්න එපා)";
       $("updnotes").textContent = ""; $("updbtn").style.display = "none";
+      if (gone < 120) setTimeout(poll, 2000);
+      else log("Engine එක ආයෙ start වුණේ නැහැ. Start menu > AutoWed > AutoWed Engine open කරන්න.", "bad");
       return;
     }
-    if (s.status === "downloading") $("updtxt").textContent = `Download වෙනවා... ${Math.round(s.progress * 100)}% · ඉවර වුණාම Premiere close වෙලා update වෙලා ආයෙ open වෙනවා`;
+    if (gone > 0) {
+      let v = ""; try { v = (await call("GET", "/api/ping", null, 3000)).version || ""; } catch (e) {}
+      $("updtxt").textContent = `✔ Engine v${v} දැන් වැඩ. අලුත් panel එක ගන්න Premiere close කරලා ආයෙ open කරන්න (වැඩේ ඉවර වුණාම).`;
+      log(`✔ Update install වුණා (engine v${v}). Premiere restart කළාම panel එකත් අලුත් වෙනවා.`, "ok");
+      return;
+    }
+    if (s.status === "downloading") $("updtxt").textContent = `Download වෙනවා... ${Math.round(s.progress * 100)}%`;
     else if (s.status === "installing") $("updtxt").textContent = s.message;
     if (s.status === "error") { log(s.message, "bad"); $("updbtn").disabled = false; return; }
-    setTimeout(poll, 700);
+    setTimeout(poll, 1000);
   };
   poll();
 }
@@ -323,9 +335,14 @@ async function readSequence(rangeOverride) {
 let LIVE_GAP_MS = 60;
 // "calm" mode (all cuts after the analysis): every 20 edits a 1 s rest, with a counter in the panel
 let CALM = false, CALM_N = 0, CALM_TOTAL = 0;
+let LIVE_N = 0;
 async function breathe() {
   await sleep(LIVE_GAP_MS);
-  if (!CALM) return;
+  if (!CALM) {
+    // live cuts too: a longer rest every 15 edits, Premiere redraws the timeline in between
+    if (++LIVE_N % 15 === 0) await sleep(800);
+    return;
+  }
   CALM_N++;
   if ($("stage")) $("stage").textContent = `Timeline එකේ cuts දානවා ${CALM_N}${CALM_TOTAL ? "/" + CALM_TOTAL : ""}…`;
   if (CALM_TOTAL && $("pct")) $("pct").textContent = Math.min(99, Math.round(CALM_N / CALM_TOTAL * 100)) + "%";
@@ -700,6 +717,7 @@ function makeApplier(project, target, kind, cutTracks, trackOfCam, rangeT0, rang
   let followed = false, lastFollow = 0;
   async function cutAt(times) {
     for (const t of times) {
+      if (STOPPING) return;            // Stop: finish the cut in hand, start no new one
       const key = t.toFixed(3);
       if (done.has(key) || t <= 0.001) continue;
       try { await razorTracks(project, await tgt(), cutTracks, t, native); await breathe(); }
@@ -766,6 +784,7 @@ function makeApplier(project, target, kind, cutTracks, trackOfCam, rangeT0, rang
       for (let i = 1; i < segments.length; i++) cuts.push(segments[i].start);
       if (final) cuts.push(rangeT1);
       await cutAt(cuts);
+      if (STOPPING) return;
       await retryStale(() => enablePieces(segments, until));
       // keep the timeline view on the newest cut, so the edit can be watched as it happens
       try {
@@ -1909,6 +1928,11 @@ async function qAddInOut() {
   const dup = QUEUE.find((q) => q.seqGuid === seq.guid.toString() && q.status !== "done" && q.event === ev &&
                                Math.abs(q.range[0] - inT) < 0.5 && Math.abs(q.range[1] - outT) < 0.5);
   if (dup) { log(`මේ කොටස (${fmt(inT)} → ${fmt(outT)}) දැනටමත් ලිස්ට් එකේ තියෙනවා.`, "warn"); return; }
+  // same part of the timeline under another event: in live / end mode the second edit cuts over the first
+  const over = QUEUE.find((q) => q.seqGuid === seq.guid.toString() && q.event !== ev &&
+                                 Math.min(q.range[1], outT) - Math.max(q.range[0], inT) > 0.5 * Math.min(outT - inT, q.range[1] - q.range[0]));
+  if (over) log(`⚠ මේ කොටස ${fmt(over.range[0])} → ${fmt(over.range[1])} "${eventName(over.event)}" එකටත් ලිස්ට් එකේ තියෙනවා. ` +
+                `Settings > output "live" නම් දෙවෙනි edit එක පළවෙනි එකට උඩින් cut වෙනවා. වැරදීමක් නම් ලිස්ට් එකෙන් අයින් කරන්න.`, "warn");
   QUEUE.push({ seqGuid: seq.guid.toString(), seqName: seq.name, range: [inT, outT], event: ev, kind: $("etype").value, status: "" });
   qSave(); qRender(); goLabel();
   log(`ලිස්ට් එකට දැම්මා: ${seq.name} · ${fmt(inT)} → ${fmt(outT)} · ${eventName($("event").value)}`, "ok");
@@ -1925,6 +1949,15 @@ async function qRun() {
       if (STOPPING) { log("■ Batch ලිස්ට් එක නැවැත්තුවා.", "warn"); break; }
       n++;
       log(`── Batch ${n}/${todo.length}: ${q.seqName} · ${fmt(q.range[0])} → ${fmt(q.range[1])} · ${eventName(q.event)}`, "ok");
+      const outMode = ($("x_live") && $("x_live").value) || "new";
+      const clash = outMode !== "new" && QUEUE.find((o) => o !== q && o.status === "done" && o.seqGuid === q.seqGuid &&
+        Math.min(o.range[1], q.range[1]) - Math.max(o.range[0], q.range[0]) > 0.5 * Math.min(q.range[1] - q.range[0], o.range[1] - o.range[0]));
+      if (clash) {
+        log(`⚠ මඟ හැරියා: ${fmt(q.range[0])} → ${fmt(q.range[1])} කොටස "${eventName(clash.event)}" විදිහට දැනටමත් edit කරලා. ` +
+            `ආයෙ කළොත් ඒ edit එකට උඩින් cuts වැටෙනවා. ඕන නම් Settings > output "new" කරලා ආයෙ run කරන්න.`, "warn");
+        q.status = "error"; qSave(); qRender(); goLabel();
+        continue;
+      }
       q.status = "running"; qRender();
       let ok = false;
       try {
