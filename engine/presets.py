@@ -36,6 +36,8 @@ class EventPreset:
     w_talk: float = 0.0           # speeches: the camera that sees the speaker's mouth moving
     w_close: float = 0.0          # rituals: lean on the tightest camera (biggest faces / hands)
     ritual_marks: bool = False    # poruwa: markers for chanting, drums, applause, quiet moments
+    speaker_lock: float = 0.0     # speeches: stay on the speaker; reactions only at key moments
+                                  # (applause / laughter / cheering)
     shake_ref: float = 0.010      # jitter that costs 1 point
     pan_limit: float = 0.30       # frame widths / s before a move counts as a whip
     rhythm_forgive: float = 0.0   # 0..1 handheld movement that follows the music is fine
@@ -69,17 +71,29 @@ PRESETS: dict[str, EventPreset] = {p.id: p for p in [
                 max_shot=6.0, rhythm_forgive=0.7, w_couple=0.4, w_face=1.2, switch_cost=0.5),
     EventPreset("poruwa", "පෝරුව", "Poruwa ceremony", **{**_CALM, "w_close": 0.5, "ritual_marks": True,
                                                          "w_talk": 0.4}),
-    EventPreset("pahana", "පහන / කිරි කළය", "Oil lamp / milk pot", **{**_CALM, "min_shot": 2.0,
-                                                                        "max_shot": 8.0}),
+    EventPreset("registration", "Registration", "Registration (signing)", **{**_CALM, "min_shot": 3.0,
+                                                                            "max_shot": 9.0, "w_close": 0.4,
+                                                                            "w_couple": 1.2, "w_talk": 0.5}),
+    EventPreset("pahana", "පහන දැල්වීම", "Oil lamp lighting", **{**_CALM, "min_shot": 2.0, "max_shot": 7.0,
+                                                               "w_close": 0.4}),
+    EventPreset("kiri_kalaya", "කිරි කළය", "Milk pot (kiri ithireema)", **{**_CALM, "min_shot": 2.0,
+                                                                          "max_shot": 7.0, "w_close": 0.5}),
+    EventPreset("cake_cutting", "Cake Cutting", "Cake cutting", grid="auto", min_shot=2.0, max_shot=7.0,
+                switch_cost=0.6, rhythm_forgive=0.7, w_couple=1.6, w_couple_id=0.8, w_face=1.2,
+                w_smile=0.5, w_close=0.3),
     EventPreset("first_dance", "First Dance", "First dance", **{**_DANCE, "min_shot": 2.0, "max_shot": 6.0,
                                                                 "switch_cost": 0.6, "w_couple": 1.4,
-                                                                "w_couple_id": 0.5, "w_wide": 0.8}),
+                                                                "w_couple_id": 0.5, "w_wide": 0.0}),
     EventPreset("table_visit", "Table Visit", "Table visit", grid="auto", min_shot=2.0, max_shot=7.0,
                 w_couple=0.8, w_face=1.4),
     EventPreset("surprise_dance", "Surprise Dance", "Surprise dance", **_DANCE),
+    EventPreset("songs", "Songs", "Songs (live singing)", **{**_DANCE, "min_shot": 2.0, "max_shot": 7.0,
+                                                             "switch_cost": 0.6, "w_face": 0.8, "w_talk": 0.8,
+                                                             "w_wide": 0.0, "roll_cuts": False}),
     EventPreset("dance_floor", "Dance Floor", "Dance floor", **_DANCE),
     EventPreset("speeches", "Speeches", "Speeches", **{**_CALM, "w_couple": 0.3, "w_face": 1.2,
-                                                      "max_shot": 14.0, "min_shot": 4.0, "w_talk": 1.4}),
+                                                      "max_shot": 14.0, "min_shot": 4.0, "w_talk": 1.4,
+                                                      "speaker_lock": 1.5}),
     EventPreset("church_mass", "Church Mass", "Church mass", **{**_CALM, "max_shot": 14.0,
                                                                "min_shot": 4.0, "switch_cost": 1.1}),
 ]}

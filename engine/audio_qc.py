@@ -12,7 +12,7 @@ from scipy.ndimage import uniform_filter1d
 from .media import extract_audio
 
 RATE = 16000
-TARGET_LUFS = {"speeches": -16.0, "church_mass": -16.0, "poruwa": -16.0, "pahana": -16.0}
+TARGET_LUFS = {"speeches": -16.0, "church_mass": -16.0, "poruwa": -16.0, "pahana": -16.0, "kiri_kalaya": -16.0, "registration": -16.0}
 DEFAULT_TARGET = -14.0
 
 

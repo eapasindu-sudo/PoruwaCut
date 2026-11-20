@@ -1196,13 +1196,11 @@ async function runAutoEdit(jobOpts) {
   }
   const project = await ppro.Project.getActiveProject();
   sd.guid = sd.seq.guid.toString();
-  const kind = $("etype").value === "single" ? "single" : "stacked";   // Multicam mode removed
+  const kind = "stacked";   // only manual edit (multicam and single camera were removed)
   const range = [sd.inT, sd.outT];
   const event = jobOpts.event || $("event").value || "auto";
   const evName = eventName(event);
   showProgress("prepare", 0, null);
-
-  if (kind === "single") return await runSingle(project, sd, range, event, evName);
 
   let cams, applier = null, nest = null, nestInfo = null;
   // output: "new" = your timeline is not touched, the finished edit opens as a new timeline (default);
@@ -2147,7 +2145,7 @@ async function showStats() {
 }
 
 // studio presets: every panel setting, saved as a file others can copy (Documents\AutoWed Presets)
-const PRESET_IDS = ["event", "etype", "x_live", "x_audon", "x_alink", "x_sact", "x_smin", "min_shot", "max_shot", "stab", "stab_thr", "x_sil", "x_flash", "x_trim", "x_trans", "x_loud", "x_mic", "x_couple", "x_qc"];
+const PRESET_IDS = ["event", "etype", "x_live", "x_audon", "x_alink", "min_shot", "max_shot", "stab", "stab_thr", "x_sil", "x_flash", "x_trim", "x_trans", "x_loud", "x_mic", "x_couple", "x_qc"];
 let STUDIO = [];
 async function presetsRefresh(quiet) {
   try {
@@ -2247,9 +2245,9 @@ function renderPills() {
   }
 }
 function renderKind() {
-  // Multicam mode is gone: "stacked" (several cameras) or "single" (one camera)
+  // only manual edit
   const et = $("etype");
-  if (et.value !== "single") et.value = "stacked";
+  et.value = "stacked";
   for (const b of document.querySelectorAll("#kindseg .seg")) b.className = "seg" + (b.getAttribute("data-k") === et.value ? " on" : "");
   if ($("etypehint")) $("etypehint").textContent = HINTS[et.value] || "";
 }

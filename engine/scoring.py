@@ -204,4 +204,19 @@ def score_cameras(analysis: dict, cfg: ModeConfig, beat_period: float | None = N
                       "obstruct": obstruct, "face": face, "couple": couple, "rhythm": rhythm,
                       "smile": smile, "couple_id": cid,
                       "hug": _nan_fill(c["hug"]) if "hug" in c and np.isfinite(c["hug"]).any() else np.zeros(N)})
+    # speeches: the speaker (the camera whose biggest face talks most, held over ~4 s) gets a lift
+    # all the time except at key moments (applause / laughter), where the other cameras get it
+    lock = getattr(cfg, "speaker_lock", 0.0)
+    if lock > 0 and C > 1 and all(p and "talk" in p for p in parts):
+        tk = np.stack([p["talk"] for p in parts], 0)
+        kk = max(1, int(4.0 * fps))
+        tk = np.stack([np.convolve(r, np.ones(kk) / kk, mode="same") for r in tk], 0)
+        spk = np.argmax(tk, 0)
+        has = tk.max(0) > 0.08
+        key = np.asarray(analysis.get("key", np.zeros(N)), np.float64)[:N]
+        if key.size < N:
+            key = np.pad(key, (0, N - key.size))
+        for i in range(C):
+            me = (spk == i) & has
+            scores[i] += np.where(key > 0.5, np.where(me, -0.3 * lock, 0.5 * lock), np.where(me, lock, -0.2 * lock))
     return scores, parts

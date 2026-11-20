@@ -152,9 +152,9 @@
         <span class="lbl" data-i18n="l_event">EVENT</span>
         <div class="pills" id="evpills"></div>
         <select id="event" style="display:none"></select>
-        <span class="lbl" data-i18n="l_etype">EDIT වර්ගය</span>
-        <div class="seg2" id="kindseg"><div class="seg" data-k="stacked">කැමරා කිහිපයක්</div><div class="seg" data-k="single">Single camera</div></div>
-        <select id="etype" style="display:none"><option value="stacked">Manual cutting (stacked)</option><option value="single">Single camera</option></select>
+        <span class="lbl" data-i18n="l_etype" style="display:none">EDIT වර්ගය</span>
+        <div class="seg2" id="kindseg" style="display:none"><div class="seg" data-k="stacked">Manual</div></div>
+        <select id="etype" style="display:none"><option value="stacked">Manual cutting (stacked)</option></select>
         <div class="hint" id="etypehint"></div>
         <span class="lbl" data-i18n="l_moments">MOMENTS &amp; CHECKS</span>
         <div id="mlist"><div class="mute" data-i18n="m_empty">Edit එක ඉවර වුණාම මෙතන පෙන්නනවා.</div></div>
@@ -179,8 +179,6 @@
         <div class="row"><label>Phone notify</label><select id="x_ntfy_on"><option value="on" selected>ON</option><option value="off">OFF</option></select></div>
         <div class="row"><label>ntfy topic</label><input id="x_ntfy" type="text" style="width:150px"><button id="ntfytest">Test</button></div>
         <div class="hint">Phone එකේ <b>ntfy</b> app එක (free) install කරලා මේ topic එකට subscribe කරන්න. Edit එකක් ඉවර වුණාම notification එකක් එනවා.</div>
-        <div class="row"><label>Silence (single)</label><select id="x_sact"><option value="remove" selected>අයින් කරලා ගැප්පීම</option><option value="disable">Cut කරලා disable</option><option value="markers">Markers විතරයි</option></select></div>
-        <div class="row"><label>Silence දිග (s)</label><input id="x_smin" type="number" min="0.5" step="0.5" value="2"></div>
         <div class="row"><label>Camera audio</label><select id="x_alink"><option value="nocut" selected>Cut කරන්න එපා (video කෑලි link නැහැ)</option><option value="link">Video එකත් එක්ක cut කරන්න (link වෙලා)</option></select></div>
         <div class="row"><label>Audio</label><select id="x_audon"><option value="enabled" selected>Enable audio විතරක් අහන්න</option><option value="all">Disable ඒවත් අහන්න</option></select></div>
         <div class="row"><label>Edit එක</label><select id="x_live"><option value="new" selected>අලුත් timeline එකක් (මගේ timeline එකට අත තියන්න එපා)</option><option value="live">මගේ timeline එකේම live cut</option><option value="end">මගේ timeline එකේ, අන්තිමට එකපාර</option></select></div>

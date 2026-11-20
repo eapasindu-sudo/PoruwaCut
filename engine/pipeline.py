@@ -23,7 +23,7 @@ from .switcher import apply_dead_cuts, block_scores, build_cut_grid, choose, to_
 from .xml_export import build_xml
 
 
-COUPLE_EVENTS = {"auto", "groom_welcome", "bride_welcome", "poruwa", "pahana", "first_dance",
+COUPLE_EVENTS = {"auto", "groom_welcome", "bride_welcome", "poruwa", "pahana", "kiri_kalaya", "registration", "cake_cutting", "first_dance",
                  "table_visit", "surprise_dance", "speeches", "church_mass"}
 
 
@@ -261,6 +261,20 @@ def run(project: dict, event: str = "auto", out_dir: str = "out", overrides: dic
             log(f"  face recognition මඟ හැරියා: {e}")
     prog("faces", 1.0)
 
+    # speeches: key moments (applause / laughter / cheering) from the sound, per second
+    key_sec = None
+    if getattr(preset, "speaker_lock", 0.0) > 0 and len(mix16) > 16000 * 5:
+        try:
+            from .events_detect import KINDS, classify
+            lab = classify(mix16, 16000)
+            k = (lab == KINDS.index("applause")).astype(np.float64)
+            k = np.convolve(k, np.ones(4), mode="same") > 0          # a little before and after
+            key_sec = k.astype(np.float64)
+            if key_sec.any():
+                log(f"  key moments (අත්පොළසන් / සිනහ) {int(key_sec.sum())}s: එතන විතරක් reactions")
+        except Exception as e:  # noqa: BLE001
+            log(f"  key moments මඟ හැරියා: {e}")
+
     # ---- window by window ---------------------------------------------------------------------
     log("කැමරා visuals analyze කරමින් (window එකෙන් window එක, cuts live)...")
     C = len(project["cameras"])
@@ -288,6 +302,9 @@ def run(project: dict, event: str = "auto", out_dir: str = "out", overrides: dic
         times = np.concatenate(acc_times)
         analysis = {"times": times, "fps": analysis_fps,
                     "cams": [{m: np.concatenate(acc[i][m]) for m in METRICS} for i in range(C)]}
+        if key_sec is not None:
+            idx = np.clip(np.floor(times - t0).astype(int), 0, len(key_sec) - 1)
+            analysis["key"] = key_sec[idx]
         scores, _parts = score_cameras(analysis, preset, beat_period)
         if w1 - commit_t < preset.min_shot + lookahead and not final:
             continue
