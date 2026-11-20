@@ -2415,7 +2415,7 @@ async function checkLicense() {
 }
 async function licActivate() {
   const key = (($("lickey") && $("lickey").value) || "").trim().toUpperCase();
-  if (!/^AW-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(key)) { $("licmsg").textContent = "Key එක AW-XXXX-XXXX-XXXX විදිහට දාන්න."; return; }
+  if (!/^[A-Z0-9]{2,6}(-[A-Z0-9]{3,6}){2,5}$/.test(key)) { $("licmsg").textContent = "Key එක හරියට දාන්න (උදා. AW-XXXX-XXXX-XXXX)."; return; }
   $("licmsg").textContent = "Activate කරනවා…";
   const r = await call("POST", "/api/license/activate", { key });
   if (r && r.ok) { hideLicense(); renderLicInfo(r); log(`✔ License activate කළා · ${r.expires} දක්වා. ස්තූතියි!`, "ok"); }
