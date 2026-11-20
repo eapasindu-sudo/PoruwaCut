@@ -1906,7 +1906,7 @@ async function qAddInOut() {
   const inT = (await seq.getInPoint()).seconds, outT = (await seq.getOutPoint()).seconds, endT = (await seq.getEndTime()).seconds;
   if (!(outT > inT + 0.5) || (inT < 0.01 && Math.abs(outT - endT) < 0.05)) { log("ලිස්ට් එකට දාන්න කලින් In (I) සහ Out (O) දාන්න.", "bad"); return; }
   const ev = $("event").value || "auto";
-  const dup = QUEUE.find((q) => q.seqGuid === seq.guid.toString() && q.status !== "done" &&
+  const dup = QUEUE.find((q) => q.seqGuid === seq.guid.toString() && q.status !== "done" && q.event === ev &&
                                Math.abs(q.range[0] - inT) < 0.5 && Math.abs(q.range[1] - outT) < 0.5);
   if (dup) { log(`මේ කොටස (${fmt(inT)} → ${fmt(outT)}) දැනටමත් ලිස්ට් එකේ තියෙනවා.`, "warn"); return; }
   QUEUE.push({ seqGuid: seq.guid.toString(), seqName: seq.name, range: [inT, outT], event: ev, kind: $("etype").value, status: "" });
