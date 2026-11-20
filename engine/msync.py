@@ -96,7 +96,8 @@ def envelope(path: str, cache_dir: str | None = None) -> np.ndarray:
     if cp:
         try:
             os.makedirs(cache_dir, exist_ok=True)
-            np.save(cp, e)
+            np.save(cp + ".part.npy", e)
+            os.replace(cp + ".part.npy", cp)
         except OSError:
             pass
     return e

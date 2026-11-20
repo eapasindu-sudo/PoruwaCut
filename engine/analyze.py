@@ -177,13 +177,26 @@ def analyze_file(path: str, f_start: float, f_end: float, fps: float, cache_dir:
         if cl <= 0:
             break
         cp = _cache_path(cache_dir, path, cs, chunk_len, fps)
+        d = None
         if os.path.exists(cp):
-            d = dict(np.load(cp))
-            if tick:
-                tick(cl)  # cached segment counts as done
-        else:
+            try:
+                d = dict(np.load(cp))
+                if tick:
+                    tick(cl)  # cached segment counts as done
+            except Exception:  # noqa: BLE001  half-written cache (crash / power cut) -> analyze again
+                d = None
+                try:
+                    os.remove(cp)
+                except OSError:
+                    pass
+        if d is None:
             d = _analyze_chunk(path, cs, cl, fps, use_gpu, tick)
-            np.savez_compressed(cp, **d)
+            tmp = cp + ".part.npz"
+            try:
+                np.savez_compressed(tmp, **d)
+                os.replace(tmp, cp)      # atomic: a crash never leaves a broken cache file
+            except OSError:
+                pass
         parts.append((ci, d))
         if progress:
             progress(path, ci - c0 + 1, c1 - c0)
