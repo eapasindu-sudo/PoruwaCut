@@ -102,6 +102,10 @@ jobs:
           $r | ConvertTo-Json
           $env:FFMPEG = "$PWD\build\ffmpeg\ffmpeg.exe"
           python tools/make_test_footage.py testshoot
+          # the edit needs a licence: a trial from the licence server (also tests activation end to end)
+          $lic = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:7788/api/license/trial -Body "{}" -ContentType "application/json"
+          $lic | ConvertTo-Json
+          if (-not $lic.ok) { throw "licence trial failed: $($lic.message)" }
           $body = @{ project = @{ cams = @("$PWD\testshoot\cam1_master.mp4", "$PWD\testshoot\cam2_close.mp4", "$PWD\testshoot\cam3_side.mp4"); master = 1 }; mode = "ceremony"; options = @{ cpu = $true } } | ConvertTo-Json -Depth 5
           $job = (Invoke-RestMethod -Method Post -Uri http://127.0.0.1:7788/api/edit -Body $body -ContentType "application/json").job
           for ($i = 0; $i -lt 90; $i++) {
@@ -111,6 +115,7 @@ jobs:
           }
           $j.log -join "`n"
           if ($j.status -ne "done") { throw "test edit failed: $($j.status)" }
+          Invoke-RestMethod -Method Post -Uri http://127.0.0.1:7788/api/license/remove -Body "{}" -ContentType "application/json" | Out-Null
           Invoke-RestMethod -Method Post http://127.0.0.1:7788/api/quit | Out-Null
           Remove-Item -Recurse -Force dist/PoruwaCutEngine/ffmpeg
 
