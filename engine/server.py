@@ -249,6 +249,7 @@ def __run_edit_impl(job, body):
             mode = body.get("event") or body.get("mode") or "auto"
             out_dir = body.get("out_dir") or _default_out(p, mode)
             os.makedirs(out_dir, exist_ok=True)
+            _remember_cache(os.path.join(os.path.dirname(os.path.abspath(out_dir)), ".poruwacut_cache"))
             proj.save(p, os.path.join(out_dir, "project.json"))
             ov = {k: o.get(k) for k in ("min_shot", "max_shot", "switch_cost", "stay_cost")}
             # learned from the editor's own changes (Learn button): shot length scale for this event
@@ -360,6 +361,8 @@ def api(method: str, path: str, body: dict | None = None):
             return 200, {**job, "log": list(job["log"])}
         if path == "/api/stats":
             return 200, _stats_summary()
+        if path == "/api/cache":
+            return 200, cache_info()
         if path == "/api/studio_presets":
             folder = os.path.join(os.path.expanduser("~"), "Documents", "AutoWed Presets")
             out = []
@@ -436,6 +439,30 @@ def api(method: str, path: str, body: dict | None = None):
             elif job.get("status") == "queued":
                 job["status"] = "cancelled"
             return 200, {"ok": True}
+        if path == "/api/notify":
+            # phone notification through ntfy.sh (free app; subscribe to the same topic on the phone)
+            topic = "".join(ch for ch in str(body.get("topic") or "") if ch.isalnum() or ch in "-_")[:64]
+            if not topic:
+                return 400, {"error": "topic නැහැ"}
+            import urllib.request
+            title = str(body.get("title") or "AutoWed")[:120]
+            msg = str(body.get("message") or "")[:2000]
+            pr = {"min": 1, "low": 2, "default": 3, "high": 4, "max": 5}.get(str(body.get("priority") or "default"), 3)
+            payload = {"topic": topic, "title": title, "message": msg, "priority": pr,
+                       "tags": [str(body.get("tags") or "clapper")]}
+            req = urllib.request.Request("https://ntfy.sh/", data=json.dumps(payload).encode("utf-8"), method="POST",
+                                         headers={"Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    return 200, {"ok": r.status == 200}
+            except Exception as e:  # noqa: BLE001
+                return 502, {"error": str(e)}
+        if path == "/api/cache/clear":
+            if any(j.get("status") in ("queued", "running") for j in JOBS.values()):
+                return 409, {"error": "edit එකක් run වෙනවා: ඉවර වුණාම cache clear කරන්න"}
+            r = cache_clear(body.get("media_paths") or [])
+            print(f"Cache clear: {r['files']} files, {r['freed_mb']} MB", flush=True)
+            return 200, r
         if path == "/api/reset":
             # Stop everything that runs or waits
             from .media import STOP
@@ -487,6 +514,80 @@ def api(method: str, path: str, body: dict | None = None):
             return 200, {"job": job["id"]}
     return 404, {"error": "not found"}
 
+
+
+# ---------- cache (analysis / audio / sync) ----------
+CACHE_LIST = os.path.join(DATA_DIR, "caches.json")
+
+
+def _remember_cache(d: str) -> None:
+    try:
+        lst = json.load(open(CACHE_LIST, encoding="utf-8")) if os.path.exists(CACHE_LIST) else []
+        if d not in lst:
+            lst.append(d)
+            json.dump(lst, open(CACHE_LIST, "w", encoding="utf-8"))
+    except Exception:
+        pass
+
+
+def _cache_dirs(media_paths=None) -> list[str]:
+    out = [os.path.join(DATA_DIR, "cache")]
+    for mp in media_paths or []:         # the panel's clips: <media folder>/PoruwaCut_out/.poruwacut_cache
+        out.append(os.path.join(os.path.dirname(mp), "PoruwaCut_out", ".poruwacut_cache"))
+    try:
+        out += json.load(open(CACHE_LIST, encoding="utf-8"))
+    except Exception:
+        pass
+    # only folders that are AutoWed's own caches
+    return [d for d in dict.fromkeys(out) if os.path.basename(os.path.normpath(d)) in ("cache", ".poruwacut_cache")]
+
+
+def _dir_size(d: str) -> tuple[int, int]:
+    n = size = 0
+    for root, _, files in os.walk(d):
+        for f in files:
+            try:
+                size += os.path.getsize(os.path.join(root, f))
+                n += 1
+            except OSError:
+                pass
+    return n, size
+
+
+def cache_info(media_paths=None) -> dict:
+    tot_n = tot_s = 0
+    dirs = []
+    for d in _cache_dirs(media_paths):
+        if os.path.isdir(d):
+            n, sz = _dir_size(d)
+            tot_n += n
+            tot_s += sz
+            dirs.append({"path": d, "files": n, "mb": round(sz / 1e6, 1)})
+    return {"files": tot_n, "mb": round(tot_s / 1e6, 1), "dirs": dirs}
+
+
+def cache_clear(media_paths=None) -> dict:
+    import shutil
+    before = cache_info(media_paths)
+    errors = []
+    for d in _cache_dirs(media_paths):
+        if os.path.isdir(d):
+            try:
+                shutil.rmtree(d)
+            except Exception as e:      # a file in use: remove what can be removed
+                errors.append(f"{d}: {e}")
+                for root, _, files in os.walk(d):
+                    for f in files:
+                        try:
+                            os.remove(os.path.join(root, f))
+                        except OSError:
+                            pass
+    try:
+        from . import media
+        media.probe.cache_clear()
+    except Exception:
+        pass
+    return {"ok": True, "freed_mb": before["mb"], "files": before["files"], "errors": errors}
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):

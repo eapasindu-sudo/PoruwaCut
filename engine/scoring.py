@@ -100,6 +100,18 @@ def score_cameras(analysis: dict, cfg: ModeConfig, beat_period: float | None = N
     parts = []
     sig = max(1.0, 0.5 * fps)
 
+    # the tightest camera (largest faces): rituals lean on it
+    close_bias = np.zeros(C)
+    if getattr(cfg, "w_close", 0.0) > 0 and C > 1:
+        sz = []
+        for c in cams:
+            a = np.asarray(c.get("face_area", []), np.float64)
+            a = a[np.isfinite(a) & (a > 0)]
+            sz.append(float(np.median(np.sqrt(a))) if a.size >= 5 else 0.0)
+        o = np.argsort(sz)[::-1]
+        if sz[o[0]] - sz[o[1]] > 0.01:
+            close_bias[o[0]] = cfg.w_close
+
     # the widest camera: smallest faces (median face size where faces are seen; none seen = wide too)
     # and the steadiest; dance / song items lean on it
     wide_bias = np.zeros(C)
@@ -169,9 +181,17 @@ def score_cameras(analysis: dict, cfg: ModeConfig, beat_period: float | None = N
         smile = _nan_fill(c["smile"]) if "smile" in c and np.isfinite(c["smile"]).any() else np.zeros(N)
         smile = gaussian_filter1d(smile, sig)
 
-        bias = (cfg.cam_bias[i] if i < len(cfg.cam_bias) else 0.0) + wide_bias[i]
+        bias = (cfg.cam_bias[i] if i < len(cfg.cam_bias) else 0.0) + wide_bias[i] + close_bias[i]
+        # talking: mouth movement of the biggest face, smoothed over ~1.5 s
+        if getattr(cfg, "w_talk", 0.0) > 0 and "talk" in c:
+            tk = np.clip(_nan_fill(c["talk"]) / 0.02, 0, 1.5)
+            kk = max(1, int(1.5 * fps))
+            talk = np.convolve(tk, np.ones(kk) / kk, mode="same")
+        else:
+            talk = np.zeros(N)
         total = (cfg.w_sharp * sharp_s - cfg.w_exposure * exposure - cfg.w_shake * shake
                  - cfg.w_pan * pan_pen - cfg.w_obstruct * obstruct - getattr(cfg, "w_walk", 3.0) * walk
+                 + getattr(cfg, "w_talk", 0.0) * talk
                  + cfg.w_face * face
                  + getattr(cfg, "w_couple", 0.0) * couple + getattr(cfg, "w_couple_id", 0.0) * cid
                  + getattr(cfg, "w_smile", 0.0) * smile + bias)
@@ -180,7 +200,7 @@ def score_cameras(analysis: dict, cfg: ModeConfig, beat_period: float | None = N
         total[over] = cfg.good_level + cfg.good_slope * (total[over] - cfg.good_level)
         total[~valid] = -1e3
         scores[i] = total
-        parts.append({"walk": walk, "sharp": sharp_s, "exposure": exposure, "shake": shake, "pan": pan_pen,
+        parts.append({"talk": talk, "walk": walk, "sharp": sharp_s, "exposure": exposure, "shake": shake, "pan": pan_pen,
                       "obstruct": obstruct, "face": face, "couple": couple, "rhythm": rhythm,
                       "smile": smile, "couple_id": cid,
                       "hug": _nan_fill(c["hug"]) if "hug" in c and np.isfinite(c["hug"]).any() else np.zeros(N)})

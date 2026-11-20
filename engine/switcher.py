@@ -12,7 +12,7 @@ import numpy as np
 
 
 def build_cut_grid(t0: float, t1: float, preset, beats=None, downbeats=None, phrases=None,
-                   music=None, filler_step: float = 0.5):
+                   music=None, filler_step: float = 0.5, rolls=None):
     """Return (bounds[T+1], weight[T+1]).  weight multiplies the switch cost at that boundary."""
     pts: dict[float, float] = {}
 
@@ -46,6 +46,14 @@ def build_cut_grid(t0: float, t1: float, preset, beats=None, downbeats=None, phr
     for t, s in zip(ph_t, ph_s):
         if not is_music(t):
             add(t, 0.55 - 0.3 * float(s))
+    # drum rolls: cut on the roll's hits (every other hit when they are very fast), and the
+    # landing hit right after the roll is the most wanted cut of all
+    for r in rolls or []:
+        hits = r["hits"]
+        step = 2 if len(hits) > 1 and (hits[-1] - hits[0]) / max(1, len(hits) - 1) < 0.16 else 1
+        for h in hits[::step]:
+            add(h, 0.3)
+        add(r["land"], 0.12)
     # filler slots: allowed but discouraged (so a bad shot can still be left mid-phrase / off-beat)
     filler_w = 3.0 if grid in ("beats", "phrases") else 2.2
     for t in np.arange(t0 + filler_step, t1, filler_step):
@@ -79,8 +87,15 @@ def block_scores(scores: np.ndarray, times: np.ndarray, bounds: np.ndarray) -> n
     return out
 
 
+def _roll_mask(bounds, rolls):
+    m = np.zeros(len(bounds), bool)
+    for r in rolls or []:
+        m |= (bounds >= r["start"] - 0.05) & (bounds <= r["land"] + 0.05)
+    return m
+
+
 def choose(bs: np.ndarray, bounds: np.ndarray, weight: np.ndarray, preset, prev_cam: int | None = None,
-           final: bool = True) -> np.ndarray:
+           final: bool = True, rolls=None, beat_period=None) -> np.ndarray:
     """Semi-Markov DP with shot lengths in seconds. Returns camera index per block."""
     C, T = bs.shape
     cs = np.concatenate([np.zeros((C, 1)), np.cumsum(bs, axis=1)], axis=1).T  # [T+1, C]
@@ -93,6 +108,18 @@ def choose(bs: np.ndarray, bounds: np.ndarray, weight: np.ndarray, preset, prev_
     # camera is unusable (not recording / far worse)
     np.fill_diagonal(trans, preset.switch_cost + 4.0 * preset.stay_cost)
     hard_max = preset.max_shot * 2.0
+    # inside a drum roll shots may be as short as the roll's hits, and should not stay long
+    in_roll = _roll_mask(bounds, rolls)
+    roll_min = max(0.25, min(preset.min_shot, 0.5 * (beat_period or 0.5)))
+    roll_max = max(roll_min * 2, beat_period or 0.5)
+    min_at = np.where(in_roll, roll_min, preset.min_shot)
+    max_at = np.where(in_roll, roll_max, preset.max_shot)
+    # seconds of roll inside each block, cumulated: a shot that holds through a roll pays for it
+    cov = np.zeros(T)
+    for r in rolls or []:
+        a, b = r["start"], r["land"]
+        cov += np.clip(np.minimum(bounds[1:], b) - np.maximum(bounds[:-1], a), 0, None)
+    ccov = np.concatenate([[0.0], np.cumsum(cov)])
     first_cost = np.zeros(C)
     if prev_cam is not None:
         first_cost = np.full(C, preset.switch_cost * weight[0])
@@ -101,13 +128,17 @@ def choose(bs: np.ndarray, bounds: np.ndarray, weight: np.ndarray, preset, prev_
         dur_all = bounds[t] - bounds[:t]                      # durations for starts 0..t-1
         ok = dur_all <= hard_max
         if not (final and t == T):
-            ok &= (dur_all >= preset.min_shot) | (np.arange(t) == 0)
+            ok &= (dur_all >= min_at[:t]) | (np.arange(t) == 0)
         starts = np.nonzero(ok)[0]
         if len(starts) == 0:
             starts = np.array([t - 1])
         dur = dur_all[starts]
         seg = cs[t][None, :] - cs[starts]                     # [L, C]
-        over = 2.0 * preset.stay_cost * np.maximum(0.0, dur - preset.max_shot) / preset.max_shot
+        mx = max_at[starts]
+        over = 2.0 * preset.stay_cost * np.maximum(0.0, dur - mx) / mx
+        if rolls:
+            ro = ccov[t] - ccov[starts]
+            over = over + 3.0 * preset.stay_cost * np.maximum(0.0, ro - roll_max) / roll_max
         prev = best[starts]                                   # [L, C']
         cand = prev[:, :, None] - trans[None] * weight[starts][:, None, None]  # [L, C', C]
         z = starts == 0

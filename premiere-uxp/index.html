@@ -152,9 +152,9 @@
         <span class="lbl" data-i18n="l_event">EVENT</span>
         <div class="pills" id="evpills"></div>
         <select id="event" style="display:none"></select>
-        <span class="lbl" data-i18n="l_etype" style="display:none">EDIT වර්ගය</span>
-        <div class="seg2" id="kindseg" style="display:none"><div class="seg" data-k="stacked">Manual cutting</div></div>
-        <select id="etype" style="display:none"><option value="stacked">Manual cutting (stacked)</option></select>
+        <span class="lbl" data-i18n="l_etype">EDIT වර්ගය</span>
+        <div class="seg2" id="kindseg"><div class="seg" data-k="stacked">කැමරා කිහිපයක්</div><div class="seg" data-k="single">Single camera</div></div>
+        <select id="etype" style="display:none"><option value="stacked">Manual cutting (stacked)</option><option value="single">Single camera</option></select>
         <div class="hint" id="etypehint"></div>
         <span class="lbl" data-i18n="l_moments">MOMENTS &amp; CHECKS</span>
         <div id="mlist"><div class="mute" data-i18n="m_empty">Edit එක ඉවර වුණාම මෙතන පෙන්නනවා.</div></div>
@@ -167,6 +167,8 @@
         <div class="btnrow"><button id="qadd" data-i18n="qadd_btn">+ In/Out</button><button id="evfind" data-i18n="evfind_btn">Events හොයන්න</button><button id="qclear" data-i18n="qclear_btn">Clear</button></div>
         <div id="queue" style="margin-top:8px"></div>
         <button id="qrun" class="go" style="width:100%; margin-top:6px" data-i18n="qrun_btn">ඔක්කොම Edit ▶</button>
+        <button id="wedauto" style="width:100%; margin-top:6px" title="In/Out නැත්නම් මුළු timeline එකම: events හොයලා ලිස්ට් එකට දාලා ඔක්කොම edit කරනවා">Wedding එකම Auto</button>
+        <div class="row" style="margin-top:6px"><label>වෙලාවට</label><input id="q_at" type="text" placeholder="23:30" style="width:70px"><select id="q_mode"><option value="list">ලිස්ට් එක</option><option value="wedding">Wedding එකම</option></select><button id="qsched">වෙලාවට Run</button></div>
       </div>
 
       <div class="pane" id="p_set">
@@ -174,6 +176,11 @@
         <div class="row"><label data-i18n="l_min">අවම shot (s)</label><input id="min_shot" type="text" placeholder="auto"></div>
         <div class="row"><label data-i18n="l_max">උපරිම shot (s)</label><input id="max_shot" type="text" placeholder="auto"></div>
         <div class="row"><label data-i18n="l_trim">Smart trim</label><select id="x_trim"><option value="on" data-i18n="o_on">ඔව් (හිස් මුල/අග off)</option><option value="off" data-i18n="o_off">එපා</option></select></div>
+        <div class="row"><label>Phone notify</label><select id="x_ntfy_on"><option value="on" selected>ON</option><option value="off">OFF</option></select></div>
+        <div class="row"><label>ntfy topic</label><input id="x_ntfy" type="text" style="width:150px"><button id="ntfytest">Test</button></div>
+        <div class="hint">Phone එකේ <b>ntfy</b> app එක (free) install කරලා මේ topic එකට subscribe කරන්න. Edit එකක් ඉවර වුණාම notification එකක් එනවා.</div>
+        <div class="row"><label>Silence (single)</label><select id="x_sact"><option value="remove" selected>අයින් කරලා ගැප්පීම</option><option value="disable">Cut කරලා disable</option><option value="markers">Markers විතරයි</option></select></div>
+        <div class="row"><label>Silence දිග (s)</label><input id="x_smin" type="number" min="0.5" step="0.5" value="2"></div>
         <div class="row"><label>Camera audio</label><select id="x_alink"><option value="nocut" selected>Cut කරන්න එපා (video කෑලි link නැහැ)</option><option value="link">Video එකත් එක්ක cut කරන්න (link වෙලා)</option></select></div>
         <div class="row"><label>Audio</label><select id="x_audon"><option value="enabled" selected>Enable audio විතරක් අහන්න</option><option value="all">Disable ඒවත් අහන්න</option></select></div>
         <div class="row"><label>Edit එක</label><select id="x_live"><option value="new" selected>අලුත් timeline එකක් (මගේ timeline එකට අත තියන්න එපා)</option><option value="live">මගේ timeline එකේම live cut</option><option value="end">මගේ timeline එකේ, අන්තිමට එකපාර</option></select></div>
@@ -193,6 +200,7 @@
         <div class="row"><label data-i18n="l_preset">Preset</label><select id="st_list"><option value="" data-i18n="o_pick">— තෝරන්න —</option></select></div>
         <div class="row"><label data-i18n="l_pname">නව නම</label><input id="st_name" type="text" placeholder="Endora style"></div>
         <div class="btnrow"><button id="st_save" data-i18n="st_save">Preset save</button><button id="st_refresh" data-i18n="st_refresh">ලිස්ට් එක</button><button id="learn" data-i18n="learn_btn">මගේ වෙනස්කම් ඉගෙනගන්න</button><button id="stats" data-i18n="stats_btn">Stats</button></div>
+        <div class="btnrow"><button id="cacheclr" title="Analysis / audio / sync cache මකනවා (ඊළඟ run එකේ ආයෙ analyze වෙනවා)">Cache clear</button></div>
         <span class="lbl">APP</span>
         <div class="btnrow"><button id="lang">EN</button><button id="dbg">Claude: OFF</button><button id="chk" data-i18n="chk_btn">Check update</button></div>
         <div class="mute" style="margin-top:10px">Powered by <b style="color:#b48cff">Endora</b> · <span id="ver"></span></div>

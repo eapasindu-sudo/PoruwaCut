@@ -77,7 +77,10 @@ async function call(method, path, body, timeoutMs = 8000) {
 }
 
 const LOGBUF = [];
+let LAST_DONE = "", LAST_BAD = "";
 function log(msg, cls) {
+  if (typeof msg === "string" && msg.startsWith("✔")) LAST_DONE = msg;
+  if (cls === "bad") LAST_BAD = String(msg);
   LOGBUF.push((cls ? `[${cls}] ` : "") + msg);
   if (LOGBUF.length > 800) LOGBUF.splice(0, LOGBUF.length - 800);
   const el = $("log");
@@ -495,7 +498,7 @@ function reportSyncWarns() {
 // A TrackItemSelection is only valid inside createEmptySelection's callback (Premiere 26.5: outside it
 // the remove action fails with "script object is no longer valid"), so the items are added and the
 // remove transaction runs inside the callback, on a sequence fetched just before.
-async function removeWhere(project, getSeq, pickItems, mediaType, label = "AutoWed") {
+async function removeWhere(project, getSeq, pickItems, mediaType, label = "AutoWed", ripple = false) {
   return retryStale(async () => {
     const s = await getSeq();
     const items = await pickItems(s);
@@ -505,7 +508,7 @@ async function removeWhere(project, getSeq, pickItems, mediaType, label = "AutoW
       const started = ppro.TrackItemSelection.createEmptySelection((sel) => {
         try {
           for (const it of items) sel.addItem(it, true);
-          ok = transact(project, label, () => [ppro.SequenceEditor.getEditor(s).createRemoveItemsAction(sel, false, mediaType)]);
+          ok = transact(project, label, () => [ppro.SequenceEditor.getEditor(s).createRemoveItemsAction(sel, ripple, mediaType)]);
         } catch (e) { err = e; }
         resolve();
       });
@@ -544,6 +547,7 @@ async function removeItems(project, seq, items, mediaType) {
 // camera's own audio track when that clip sits there in sync (same content, so nothing changes), and
 // otherwise onto a spare muted track, disabled.
 let SPARE_AUDIO = {};
+let SPARE_VIDEO = {};
 const IO_OFFSET = {};   // per file: project-item In/Out vs timeline in-point (seconds)
 // camera colors without closing the project: the overwrite takes the project item's label, so the
 // camera's label is put on its project item for the edit and the old one put back right after
@@ -770,6 +774,187 @@ function makeApplier(project, target, kind, cutTracks, trackOfCam, rangeT0, rang
   };
 }
 
+// ---------- Single camera (one camera, shot continuously) ----------
+// The engine analyses the one camera and its audio. Silent stretches: markers, cut + disabled, or cut
+// and removed (ripple) - Settings > Silence. Jerk / blur / exposure / walk-by / clipping / moments:
+// markers only. With "new timeline" output it all happens in a subsequence of In/Out.
+async function cutAudioAt(project, seq, aIndex, t) {
+  // like emulatedRazor, for an audio clip: overwrite its own media from t on the same audio track;
+  // a camera file's video that comes along goes to a spare video track and is removed
+  const g = seq.guid.toString();
+  const seqNow = async () => (seq = await freshSeq(project, seq, g));
+  const track = async () => (await seqNow()).getAudioTrack(aIndex);
+  const first = await retryStale(async () => {
+    const h = (await itemsOf(track)).find((x) => x.a < t - EPS && t + EPS < x.b);
+    if (!h) return null;
+    let off = false; try { off = await h.it.isDisabled(); } catch (e) {}
+    let name = ""; try { name = await h.it.getName(); } catch (e) {}
+    return { a: h.a, b: h.b, o: await readTI(h.it), raw: await h.it.getProjectItem(), off, name };
+  });
+  if (!first) return false;
+  const { a, o, raw } = first;
+  if (o.out > o.inp && Math.abs((o.out - o.inp) / (first.b - a) - 1) > 0.01) return false;
+  const pi = ppro.ClipProjectItem.cast(raw);
+  const wantIn = o.inp + (t - a);
+  if (SPARE_VIDEO[g] == null) SPARE_VIDEO[g] = await (await seqNow()).getVideoTrackCount();
+  const spareV = SPARE_VIDEO[g];
+  const over = async (inPt, outPt) => {
+    let setIO = false;
+    try {
+      transact(project, "AutoWed cut", () => [pi.createSetInOutPointsAction(tt(inPt), tt(outPt))]);
+      setIO = true;
+      await retryStale(async () => {
+        const s = await seqNow();
+        transact(project, "AutoWed cut", () => [ppro.SequenceEditor.getEditor(s).createOverwriteItemAction(raw, tt(t), spareV, aIndex)]);
+      });
+    } finally {
+      if (setIO) { try { transact(project, "AutoWed cut", () => [pi.createClearInOutPointsAction()]); } catch (e) {} }
+    }
+  };
+  const readNew = () => retryStale(async () => { const it = await findItem(track, t, null); return it ? readTI(it) : null; });
+  let off = IO_OFFSET["a|" + first.name] || 0;
+  await over(wantIn - off, o.out - off);
+  let done = await readNew();
+  for (let k = 0; k < 2 && done && Math.abs(done.inp - wantIn) > 0.004; k++) {
+    off += done.inp - wantIn; IO_OFFSET["a|" + first.name] = off;
+    await over(wantIn - off, o.out - off);
+    done = await readNew();
+  }
+  if (!done || Math.abs(done.inp - wantIn) > 0.02) syncWarns.push(fmt(t));
+  if (first.off) {
+    try { await retryStale(async () => { const it = await findItem(track, t, null); if (it) transact(project, "AutoWed cut", () => [it.createSetDisabledAction(true)]); }); } catch (e) {}
+  }
+  try {
+    await removeWhere(project, seqNow, async (s) => {
+      if (spareV >= await s.getVideoTrackCount()) return [];
+      return (await s.getVideoTrack(spareV)).getTrackItems(ppro.Constants.TrackItemType.CLIP, false);
+    }, ppro.Constants.MediaType.VIDEO, "AutoWed cut");
+  } catch (e) {}
+  await breathe();
+  return true;
+}
+
+// cut every track (video and audio) that has a clip running through t
+async function cutAllAt(project, seq, t) {
+  const g = seq.guid.toString();
+  const s = await freshSeq(project, seq, g);
+  const nv = await s.getVideoTrackCount();
+  for (let v = 0; v < nv; v++) { try { await emulatedRazor(project, await freshSeq(project, seq, g), v, t); } catch (e) {} }
+  const na = await (await freshSeq(project, seq, g)).getAudioTrackCount();
+  for (let i = 0; i < na; i++) { try { await cutAudioAt(project, await freshSeq(project, seq, g), i, t); } catch (e) {} }
+}
+
+// every clip (video + audio) lying inside [a, b]
+async function itemsInside(s, a, b) {
+  const out = [];
+  const nv = await s.getVideoTrackCount(), na = await s.getAudioTrackCount();
+  for (let v = 0; v < nv; v++) for (const x of (await s.getVideoTrack(v)).getTrackItems(ppro.Constants.TrackItemType.CLIP, false)) {
+    const xa = (await x.getStartTime()).seconds, xb = (await x.getEndTime()).seconds;
+    if (xa > a - EPS * 4 && xb < b + EPS * 4) out.push({ it: x, kind: "v" });
+  }
+  for (let i = 0; i < na; i++) for (const x of (await s.getAudioTrack(i)).getTrackItems(ppro.Constants.TrackItemType.CLIP, false)) {
+    const xa = (await x.getStartTime()).seconds, xb = (await x.getEndTime()).seconds;
+    if (xa > a - EPS * 4 && xb < b + EPS * 4) out.push({ it: x, kind: "a" });
+  }
+  return out;
+}
+
+async function runSingle(project, sd, range, event, evName) {
+  if (!sd.cams.length) { log("In/Out කොටසේ video clip එකක් හමු නොවුණි.", "bad"); return; }
+  const cam = sd.cams[0];
+  if (sd.cams.length > 1) log(`Single camera: "${cam.name}" track එක විතරක් analyze කරනවා.`, "mute");
+  const act = ($("x_sact") && $("x_sact").value) || "remove";
+  const smin = Math.max(0.5, parseFloat(($("x_smin") && $("x_smin").value) || "2") || 2);
+  const outMode = ($("x_live") && $("x_live").value) || "new";
+  renderLegend([cam.name]);
+  renderStrip([], range[0], range[1], range[0]);
+  const ex = Object.assign(gatherExtras(), { silence: true, silence_min: smin, qc: true, trim: false });
+  const body = {
+    project: { name: sd.name, fps: sd.fps, master_cam: 0, range, cameras: [{ name: cam.name, clips: cam.clips }], audio_tracks: sd.audio },
+    event, options: { layout: "stacked", kind: "single", extras: ex, xml_name: evName },
+  };
+  log(`Single camera: ${evName} · ${fmt(range[0])} → ${fmt(range[1])} · silence (${smin}s+): ${act === "remove" ? "අයින් කරනවා" : act === "disable" ? "disable" : "markers"}`);
+  const job = (await call("POST", "/api/edit", body)).job;
+  CUR_JOB = job;
+  let shown = 0, j = null;
+  while (true) {
+    await sleep(1000);
+    if (await stopRequested(job)) return false;
+    try { j = await call("GET", "/api/job/" + job); } catch (e) { continue; }
+    if (j.status === "cancelled") { log("■ නැවැත්තුවා.", "warn"); showProgress("done", j.progress || 0, null); return false; }
+    showProgress(j.stage || "queued", j.progress || 0, j.eta);
+    for (; shown < j.log.length; shown++) log(j.log[shown], j.log[shown].startsWith("ERROR") ? "bad" : "");
+    if (j.status === "error") return false;
+    if (j.status === "done") break;
+  }
+  let result = j.result;
+  showProgress("finish", 0.99, null);
+  // where: a new timeline of In/Out (default) or this timeline
+  let target = sd;
+  if (outMode === "new") {
+    try {
+      const name = `${(result.event && eventName(result.event)) || evName} (single)`;
+      const guid = await openSubFor(project, sd, result.range, name);
+      result = shiftResult(result, -result.range[0]);
+      const sd2 = await readSequence(result.range);
+      if (!sd2 || sd2.guid !== guid) throw new Error("අලුත් timeline එක active කරගන්න බැරි වුණා");
+      target = sd2;
+      log(`අලුත් timeline එක හැදුවා: "${name}". ඔබේ "${sd.name}" timeline එකට අත තියන්නේ නැහැ.`, "ok");
+    } catch (e) { log("අලුත් timeline එක: " + (e && e.message || e), "bad"); showProgress("done", 1, null); return; }
+  }
+  const project2 = await ppro.Project.getActiveProject();
+  const seqT = target.seq;
+  // markers: problems and good moments (markers only, nothing is cut for these)
+  const mk = [];
+  for (const b of result.bad || []) mk.push({ name: `⚠ ${b.why || "weak"}`, start: b.start, dur: b.end - b.start });
+  for (const c of result.clipping || []) mk.push({ name: "⚠ Audio clipping", start: c.start, dur: c.end - c.start });
+  for (const gp of result.mic_gaps || []) mk.push({ name: "⚠ Mic drop-out", start: gp.start, dur: gp.end - gp.start });
+  for (const m of result.moments || []) mk.push({ name: `★ ${m.kind || "moment"}`, start: m.time, dur: 1 });
+  for (const r of result.rituals || []) mk.push({ name: `◆ ${r.label}`, start: r.start, dur: r.end - r.start });
+  const sil = (result.silences || []).filter((x) => x.end - x.start >= smin - 0.01);
+  if (act === "markers") for (const x of sil) mk.push({ name: "Silence", start: x.start, dur: x.end - x.start });
+  const nm = await addMarkers(project2, seqT, mk);
+  log(`Markers ${nm}: issues ${(result.bad || []).length}, audio ${(result.clipping || []).length + (result.mic_gaps || []).length}, moments ${(result.moments || []).length}${act === "markers" ? `, silence ${sil.length}` : ""}`, "ok");
+  try { renderMoments(result); } catch (e) {}
+  // silences: cut every track at both ends, then disable or remove (last one first, so times hold)
+  if (act !== "markers" && sil.length) {
+    try { await project2.save(); } catch (e) {}
+    CALM = true; CALM_N = 0; CALM_TOTAL = 0;
+    const g = seqT.guid.toString();
+    let done = 0;
+    for (const x of sil.slice().reverse()) {
+      try {
+        await cutAllAt(project2, await freshSeq(project2, seqT, g), x.end);
+        await cutAllAt(project2, await freshSeq(project2, seqT, g), x.start);
+        if (act === "disable") {
+          const its = await retryStale(async () => itemsInside(await freshSeq(project2, seqT, g), x.start, x.end));
+          for (const o of its) { try { if (!(await o.it.isDisabled())) transact(project2, "AutoWed silence", () => [o.it.createSetDisabledAction(true)]); } catch (e) {} }
+        } else {
+          await removeWhere(project2, () => freshSeq(project2, seqT, g), async (s) => (await itemsInside(s, x.start, x.end)).map((o) => o.it),
+            ppro.Constants.MediaType.ANY != null ? ppro.Constants.MediaType.ANY : ppro.Constants.MediaType.VIDEO, "AutoWed silence", true);
+        }
+        done++;
+        if ($("stage")) $("stage").textContent = `Silence ${done}/${sil.length}…`;
+      } catch (e) { log(`Silence ${fmt(x.start)}: ` + (e && e.message || e), "warn"); }
+    }
+    CALM = false;
+    if (act === "remove" && done) {
+      // every join where silence was taken out is a jump cut: marked for a cutaway / transition
+      let gone = 0;
+      const joins = [];
+      for (const x of sil) { joins.push({ name: "⚠ Jump cut (silence අයින් කළා)", start: x.start - gone, dur: 0.1 }); gone += x.end - x.start; }
+      try { const nj = await addMarkers(project2, await freshSeq(project2, seqT, g), joins); log(`Jump cut markers ${nj}.`, "mute"); } catch (e) {}
+    }
+    const secs = Math.round(sil.reduce((a2, x) => a2 + x.end - x.start, 0));
+    log(`Silence ${done}ක් (${secs}s) ${act === "remove" ? "අයින් කරලා ගැප්පුවා" : "cut කරලා disable කළා"}.`, "ok");
+    await repaintTimeline(project2, g);
+  }
+  reportSyncWarns();
+  showProgress("done", 1, null);
+  log(`✔ ඉවරයි · single camera · ${evName}`, "ok");
+  return true;
+}
+
 // ---------- live strip in the panel ----------
 // same order as the clip labels AutoWed writes: Mango, Caribbean, Rose, Forest, Violet, Yellow, Cerulean, Magenta
 const CAM_COLORS = ["#e8962e", "#1fc4a8", "#f2709f", "#62b356", "#a990dd", "#e3d23f", "#2d9fd6", "#d63fae"];
@@ -927,9 +1112,35 @@ function eventName(id) {
 async function autoEdit() {
   if (busy) return;
   busy = true; $("go").disabled = true; showStop(true);
-  try { await runAutoEdit(); }
+  LAST_DONE = ""; LAST_BAD = "";
+  const ev = eventName(($("event") && $("event").value) || "auto");
+  let ok = false;
+  try { ok = await runAutoEdit(); }
   catch (e) { log("Error: " + (e && e.message || e), "bad"); }
   finally { busy = false; $("go").disabled = false; showStop(false); }
+  if (ok) notifyPhone(`✔ ${ev} edit එක ඉවරයි`, LAST_DONE || "Auto edit ඉවරයි.", "white_check_mark");
+  else if (!STOPPING) notifyPhone(`✖ ${ev} edit එක ඉවර වුණේ නැහැ`, LAST_BAD || "Panel එකේ Log එක බලන්න.", "warning", "high");
+}
+
+// ---------- phone notifications (ntfy) ----------
+// The engine posts to ntfy.sh; on the phone: install the free "ntfy" app and subscribe to the topic.
+function ntfyTopic() {
+  let t = "";
+  try { t = localStorage.getItem("autowed.ntfy") || ""; } catch (e) {}
+  if (!t) {
+    t = "autowed-" + Math.random().toString(36).slice(2, 10);
+    try { localStorage.setItem("autowed.ntfy", t); } catch (e) {}
+  }
+  return t;
+}
+function notifyOn() { return !$("x_ntfy_on") || $("x_ntfy_on").value !== "off"; }
+async function notifyPhone(title, message, tags, priority) {
+  if (!notifyOn()) return false;
+  const topic = ($("x_ntfy") && $("x_ntfy").value.trim()) || ntfyTopic();
+  try {
+    const r = await call("POST", "/api/notify", { topic, title, message, tags: tags || "clapper", priority: priority || "default" });
+    return !!(r && r.ok);
+  } catch (e) { return false; }
 }
 
 // ---------- Stop / Reset ----------
@@ -985,11 +1196,13 @@ async function runAutoEdit(jobOpts) {
   }
   const project = await ppro.Project.getActiveProject();
   sd.guid = sd.seq.guid.toString();
-  const kind = "stacked";   // Multicam mode removed
+  const kind = $("etype").value === "single" ? "single" : "stacked";   // Multicam mode removed
   const range = [sd.inT, sd.outT];
   const event = jobOpts.event || $("event").value || "auto";
   const evName = eventName(event);
   showProgress("prepare", 0, null);
+
+  if (kind === "single") return await runSingle(project, sd, range, event, evName);
 
   let cams, applier = null, nest = null, nestInfo = null;
   // output: "new" = your timeline is not touched, the finished edit opens as a new timeline (default);
@@ -1205,8 +1418,8 @@ function shiftResult(r, d) {
   const sh = (o, keys) => { for (const k of keys) if (typeof o[k] === "number") o[k] += d; };
   x.range = [r.range[0] + d, r.range[1] + d];
   if (x.trim) x.trim = [x.trim[0] + d, x.trim[1] + d];
-  for (const k of ["segments", "dead", "bad", "clipping", "mic_gaps", "silences"]) for (const o of x[k] || []) sh(o, ["start", "end"]);
-  for (const k of ["moments", "markers"]) for (const o of x[k] || []) sh(o, ["time"]);
+  for (const k of ["segments", "dead", "bad", "clipping", "mic_gaps", "silences", "rituals"]) for (const o of x[k] || []) sh(o, ["start", "end"]);
+  for (const k of ["moments", "markers", "jumps"]) for (const o of x[k] || []) sh(o, ["time"]);
   for (const o of x.mic_choice || []) sh(o, ["start", "end"]);
   x.shifted = true;
   return x;
@@ -1403,6 +1616,7 @@ async function razorTest() {
 const HINTS = {
   multicam: "In/Out කොටසේ කැමරා nest කරලා (නැත්නම් ඔබේ nest එක) ඒ timeline එකේම multicam cuts. ඉවර වුණාම angles ලියන්න project එක තත්පර කිහිපයකට close වෙලා ආයෙ open වෙනවා.",
   stacked: "In/Out කොටසේ කැමරා tracks ඒ timeline එකේම live cut කරලා, තෝරපු කැමරාව විතරක් enable. Angle මාරු කරන්න Shift+E.",
+  single: "එක කැමරාවක්: jerk / blur / walk-by / audio ප්‍රශ්න markers විදිහට; silence කොටස් Settings › Silence අනුව (අයින් / disable / markers).",
 };
 $("etype").addEventListener("change", () => { $("etypehint").textContent = HINTS[$("etype").value]; });
 $("etypehint").textContent = HINTS.multicam;
@@ -1708,8 +1922,12 @@ async function qRun() {
         ok = await runAutoEdit({ range: q.range, event: q.event, kind: q.kind });
       } catch (e) { log("Batch: " + (e && e.message || e), "bad"); }
       q.status = ok ? "done" : "error"; qSave(); qRender();
+      if (!STOPPING) notifyPhone(ok ? `✔ ${eventName(q.event)} (${n}/${todo.length})` : `✖ ${eventName(q.event)} (${n}/${todo.length})`,
+        ok ? (LAST_DONE || "edit එක ඉවරයි") : (LAST_BAD || "Log එක බලන්න"), ok ? "white_check_mark" : "warning");
     }
     log("✔ Batch ලිස්ට් එක ඉවරයි.", "ok");
+    const okN = todo.filter((q) => q.status === "done").length;
+    notifyPhone("🎬 Batch ඉවරයි", `${okN}/${todo.length} edits ඉවරයි${okN < todo.length ? " · " + (todo.length - okN) + "ක් බැරි වුණා" : ""}.`, "tada", "high");
   } finally { busy = false; $("go").disabled = false; $("qrun").disabled = false; showStop(false); }
 }
 
@@ -1843,6 +2061,8 @@ async function qcReport(project, sd, result, cams, kind) {
   for (const b of (result.bad || []).slice(0, 60)) mk.push({ name: `⚠ ${b.name}: ${b.why}`, start: b.start, dur: b.end - b.start });
   for (const c of (result.clipping || []).slice(0, 40)) mk.push({ name: `⚠ Audio clipping ${c.name}`, start: c.start, dur: c.end - c.start });
   for (const g of (result.mic_gaps || []).slice(0, 40)) mk.push({ name: `⚠ Mic drop-out ${g.name}`, start: g.start, dur: g.end - g.start });
+  for (const j of (result.jumps || []).slice(0, 60)) mk.push({ name: "⚠ Jump cut? (framing එක සමානයි)", start: j.time, dur: 0.1 });
+  for (const r of result.rituals || []) mk.push({ name: `◆ ${r.label}`, start: r.start, dur: r.end - r.start });
   if (result.trim) {
     if (result.trim[0] > result.range[0]) mk.push({ name: "Smart trim (හිස්)", start: result.range[0], dur: result.trim[0] - result.range[0] });
     if (result.trim[1] < result.range[1]) mk.push({ name: "Smart trim (හිස්)", start: result.trim[1], dur: result.range[1] - result.trim[1] });
@@ -1927,7 +2147,7 @@ async function showStats() {
 }
 
 // studio presets: every panel setting, saved as a file others can copy (Documents\AutoWed Presets)
-const PRESET_IDS = ["event", "etype", "x_live", "x_audon", "x_alink", "min_shot", "max_shot", "stab", "stab_thr", "x_sil", "x_flash", "x_trim", "x_trans", "x_loud", "x_mic", "x_couple", "x_qc"];
+const PRESET_IDS = ["event", "etype", "x_live", "x_audon", "x_alink", "x_sact", "x_smin", "min_shot", "max_shot", "stab", "stab_thr", "x_sil", "x_flash", "x_trim", "x_trans", "x_loud", "x_mic", "x_couple", "x_qc"];
 let STUDIO = [];
 async function presetsRefresh(quiet) {
   try {
@@ -2027,9 +2247,9 @@ function renderPills() {
   }
 }
 function renderKind() {
-  // Multicam mode is gone (it needed project close/reopen and did not work well): always Manual cutting
+  // Multicam mode is gone: "stacked" (several cameras) or "single" (one camera)
   const et = $("etype");
-  et.value = "stacked";
+  if (et.value !== "single") et.value = "stacked";
   for (const b of document.querySelectorAll("#kindseg .seg")) b.className = "seg" + (b.getAttribute("data-k") === et.value ? " on" : "");
   if ($("etypehint")) $("etypehint").textContent = HINTS[et.value] || "";
 }
@@ -2089,3 +2309,75 @@ if ($("x_alink")) {
   try { const v = localStorage.getItem("autowed.alink"); if (v) $("x_alink").value = v; } catch (e) {}
   $("x_alink").addEventListener("change", () => { try { localStorage.setItem("autowed.alink", $("x_alink").value); } catch (e) {} });
 }
+
+for (const id of ["x_sact", "x_smin"]) if ($(id)) {
+  try { const v = localStorage.getItem("autowed." + id); if (v) $(id).value = v; } catch (e) {}
+  $(id).addEventListener("change", () => { try { localStorage.setItem("autowed." + id, $(id).value); } catch (e) {} });
+}
+
+// Cache clear: the engine's analysis / audio / sync caches (also this sequence's media cache folders)
+async function clearCache() {
+  if (busy) { log("Edit එකක් run වෙනවා: ඉවර වුණාම cache clear කරන්න.", "warn"); return; }
+  let paths = [];
+  try {
+    const sd = seqData || await readSequence();
+    if (sd) {
+      for (const c of sd.cams || []) for (const cl of c.clips || []) if (cl.path) paths.push(cl.path);
+      for (const tr of sd.audio || []) for (const cl of tr) if (cl.path) paths.push(cl.path);
+    }
+  } catch (e) {}
+  paths = [...new Set(paths)];
+  let info = null;
+  try { info = await call("GET", "/api/cache"); } catch (e) {}
+  const r = await call("POST", "/api/cache/clear", { media_paths: paths });
+  if (r && r.ok) {
+    log(`Cache clear කළා: files ${r.files} · ${r.freed_mb} MB. ඊළඟ run එකේ ආයෙ analyze වෙනවා.`, "ok");
+    if (r.errors && r.errors.length) log("සමහර files පාවිච්චි වෙන නිසා මකන්න බැරි වුණා: " + r.errors.slice(0, 2).join(" | "), "warn");
+  } else log("Cache clear: " + ((r && r.error) || "බැරි වුණා"), "bad");
+}
+if ($("cacheclr")) $("cacheclr").onclick = () => clearCache().catch((e) => log("Cache clear: " + (e && e.message || e), "bad"));
+
+// ---------- Wedding එකම: events find -> batch list -> run (optionally at a set time) ----------
+async function weddingAuto() {
+  if (busy) return;
+  const before = QUEUE.length;
+  await findEvents();
+  const added = QUEUE.length - before;
+  if (added <= 0) { log("Events හමු වුණේ නැහැ: Batch එක run කළේ නැහැ.", "warn"); return; }
+  log(`Wedding එකම: events ${added}ක් ලිස්ට් එකට දැම්මා. දැන් ඔක්කොම edit කරනවා…`, "ok");
+  notifyPhone("AutoWed: wedding එක පටන් ගත්තා", `Events ${added}ක් හමු වුණා. Edit එක ඉවර වුණාම කියන්නම්.`, "movie_camera");
+  await qRun();
+}
+let SCHED = null;
+function scheduleRun() {
+  const v = ($("q_at") && $("q_at").value) || "";
+  if (SCHED) { clearTimeout(SCHED); SCHED = null; log("Schedule එක අයින් කළා.", "mute"); if ($("qsched")) $("qsched").textContent = "වෙලාවට Run"; return; }
+  const m = /^(\d{1,2}):(\d{2})$/.exec(v);
+  if (!m) { log("වෙලාව HH:MM විදිහට දාන්න (උදා 23:30).", "warn"); return; }
+  const now = new Date(), at = new Date();
+  at.setHours(+m[1], +m[2], 0, 0);
+  if (at <= now) at.setDate(at.getDate() + 1);
+  const ms = at - now;
+  const mode = ($("q_mode") && $("q_mode").value) || "list";
+  SCHED = setTimeout(() => {
+    SCHED = null;
+    if ($("qsched")) $("qsched").textContent = "වෙලාවට Run";
+    (mode === "wedding" ? weddingAuto() : qRun()).catch((e) => log("Schedule: " + (e && e.message || e), "bad"));
+  }, ms);
+  if ($("qsched")) $("qsched").textContent = `${v} ට run වෙනවා (cancel)`;
+  log(`${v} ට ${mode === "wedding" ? "wedding එකම auto" : "Batch ලිස්ට් එක"} run වෙනවා (තව විනාඩි ${Math.round(ms / 60000)}). Premiere සහ panel එක open කරලා තියන්න.`, "ok");
+}
+if ($("wedauto")) $("wedauto").onclick = () => weddingAuto().catch((e) => log("Wedding auto: " + (e && e.message || e), "bad"));
+if ($("qsched")) $("qsched").onclick = scheduleRun;
+if ($("x_ntfy")) {
+  $("x_ntfy").value = ntfyTopic();
+  $("x_ntfy").addEventListener("change", () => { try { localStorage.setItem("autowed.ntfy", $("x_ntfy").value.trim()); } catch (e) {} });
+}
+if ($("x_ntfy_on")) {
+  try { const v = localStorage.getItem("autowed.ntfy_on"); if (v) $("x_ntfy_on").value = v; } catch (e) {}
+  $("x_ntfy_on").addEventListener("change", () => { try { localStorage.setItem("autowed.ntfy_on", $("x_ntfy_on").value); } catch (e) {} });
+}
+if ($("ntfytest")) $("ntfytest").onclick = async () => {
+  const ok = await notifyPhone("AutoWed test", "Phone notifications වැඩ ✔", "bell");
+  log(ok ? `Test notification එක යැව්වා (topic: ${($("x_ntfy") && $("x_ntfy").value) || ntfyTopic()}).` : "Notification එක යවන්න බැරි වුණා (internet / topic බලන්න).", ok ? "ok" : "bad");
+};

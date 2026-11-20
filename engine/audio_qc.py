@@ -185,7 +185,7 @@ def mic_analysis(tracks: list[np.ndarray], t0: float, names: list[str]) -> dict:
 
 
 def run_qc(project: dict, t0: float, t1: float, event: str, mix: np.ndarray, dead: list[dict],
-           want_silence: bool, want_trim: bool) -> dict:
+           want_silence: bool, want_trim: bool, silence_min: float = 0.9) -> dict:
     out: dict = {}
     target = TARGET_LUFS.get(event, DEFAULT_TARGET)
     from .audio_events import recorder_tracks
@@ -198,7 +198,7 @@ def run_qc(project: dict, t0: float, t1: float, event: str, mix: np.ndarray, dea
     out["loudness"] = {"lufs": round(L, 1), "target": target, "gain_db": round(gain, 1)}
     out.update(mic_analysis(raw, t0, names) if raw else {"mic_choice": [], "mic_gaps": [], "clipping": []})
     if want_silence:
-        out["silences"] = silences(mix, t0)
+        out["silences"] = silences(mix, t0, min_len=silence_min)
     if want_trim:
         out["trim"] = smart_trim(mix, t0, t1, dead)
     return out

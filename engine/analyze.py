@@ -18,11 +18,11 @@ from .media import iter_frames, probe
 
 METRICS = ["sharp", "bright", "clip_hi", "clip_lo", "dx", "dy", "phase_resp",
            "local_change", "edges", "faces", "face_area", "face_central", "face_score", "pair_central",
-           "smile", "hug", "couple", "walk"]
+           "smile", "hug", "couple", "walk", "talk"]
 
 ANALYSIS_WIDTH = 480
 SMALL_WIDTH = 160
-VERSION = "5"
+VERSION = "6"
 # the couple's face embeddings (found by find_couple before the analysis), used for the "couple" metric
 COUPLE = {"centroids": None, "key": ""}
 
@@ -50,6 +50,8 @@ def _analyze_chunk(path: str, start: float, length: float, fps: float, use_gpu: 
     prev_small = None
     win = None
     last_face = None
+    mouth_box = None      # mouth area of the biggest face (from the last detection)
+    prev_mouth = None
     bg = None          # slow background of a still camera, to see someone walking in front of it
     bg_busy = 0
     bg_age = 0
@@ -127,6 +129,27 @@ def _analyze_chunk(path: str, start: float, length: float, fps: float, use_gpu: 
                         hits.add(int(sim.argmax()))
                 cp = float(len(hits))
             last_face = (*ff, sm, hg, cp)
+            mouth_box = None
+            if full is not None and len(full):
+                f = full[np.argsort(-(full[:, 2] * full[:, 3]))[0]]
+                if f[2] * f[3] > 0.003 * w * h:
+                    mx0, mx1 = min(f[10], f[12]), max(f[10], f[12])
+                    mw = max(4.0, mx1 - mx0)
+                    ny, my = f[9], (f[11] + f[13]) / 2
+                    x0, x1 = int(max(0, mx0 - 0.3 * mw)), int(min(w, mx1 + 0.3 * mw))
+                    y0, y1 = int(max(0, ny + 0.3 * (my - ny))), int(min(h, my + 0.8 * max(4.0, my - ny)))
+                    if x1 - x0 >= 6 and y1 - y0 >= 6:
+                        mouth_box = (x0, y0, x1, y1)
+        # talking: the biggest face's mouth area changes more than the frame as a whole
+        if mouth_box is not None:
+            x0, y0, x1, y1 = mouth_box
+            crop = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY).astype(np.float32)
+            crop = cv2.resize(crop, (24, 16))
+            if prev_mouth is not None:
+                out["talk"][k] = max(0.0, float(np.abs(crop - prev_mouth).mean() / 255.0) - out["local_change"][k])
+            prev_mouth = crop
+        else:
+            prev_mouth = None
         c, area, central, score, pair, sm, hg, cp = last_face
         out["smile"][k], out["hug"][k], out["couple"][k] = sm, hg, cp
         out["faces"][k], out["face_area"][k] = c, area

@@ -27,6 +27,52 @@ COUPLE_EVENTS = {"auto", "groom_welcome", "bride_welcome", "poruwa", "pahana", "
                  "table_visit", "surprise_dance", "speeches", "church_mass"}
 
 
+def _jump_cuts(times, analysis, segs):
+    """Cuts between two cameras that frame the subject almost the same way (same face size and place):
+    they look like a jump cut. Returned as warnings for markers."""
+    out = []
+    cams = analysis["cams"]
+    tt = np.asarray(times)
+    for a, b in zip(segs, segs[1:]):
+        if a["cam"] == b["cam"] or a["cam"] < 0 or b["cam"] < 0:
+            continue
+        t = b["start"]
+        i = int(np.clip(np.searchsorted(tt, t), 0, len(tt) - 1))
+        lo, hi = max(0, i - 3), min(len(tt), i + 4)
+
+        def look(c):
+            fa = np.asarray(cams[c]["face_area"][lo:hi], np.float64)
+            fc = np.asarray(cams[c]["face_central"][lo:hi], np.float64)
+            fa, fc = fa[np.isfinite(fa)], fc[np.isfinite(fc)]
+            return (float(np.sqrt(np.median(fa))) if fa.size else 0.0, float(np.median(fc)) if fc.size else 0.0)
+
+        (fa, ca), (fb, cb) = look(a["cam"]), look(b["cam"])
+        if fa > 0.05 and fb > 0.05 and abs(fa - fb) < 0.025 and abs(ca - cb) < 0.15:
+            out.append({"time": float(t), "why": "framing එක සමානයි"})
+    return out
+
+
+RITUAL_MIN = {"chant": 8.0, "drums": 4.0, "applause": 2.0, "quiet": 5.0}
+RITUAL_LABEL = {"chant": "ගාථා / පිරිත්", "drums": "බෙර / හේවිසි", "applause": "අත්පොළසන්",
+                "quiet": "නිහඬ මොහොත"}
+
+
+def _rituals(mix16, t0):
+    """Poruwa: the parts of the ceremony from its sound (chanting, drums, applause, quiet moments)."""
+    from .events_detect import KINDS, classify
+    lab = classify(mix16, 16000)
+    out, i = [], 0
+    while i < len(lab):
+        j = i
+        while j + 1 < len(lab) and lab[j + 1] == lab[i]:
+            j += 1
+        k = KINDS[lab[i]]
+        if k in RITUAL_MIN and (j - i + 1) >= RITUAL_MIN[k]:
+            out.append({"start": t0 + i, "end": t0 + j + 1, "kind": k, "label": RITUAL_LABEL[k]})
+        i = j + 1
+    return out
+
+
 def _moments(mix16, t0, times, parts, segs, max_n: int = 25):
     """Candidate highlight moments: applause / cheering, smiles, hugs on the chosen shots."""
     from .events_detect import KINDS, classify
@@ -71,7 +117,7 @@ def _weak_takes(times, parts, project, min_len: float = 3.0):
         if not p:
             continue
         for key, why, test in (("sharp", "blur / focus", lambda v: v < -1.6), ("exposure", "exposure", lambda v: v > 1.5),
-                               ("shake", "shake", lambda v: v > 2.5), ("walk", "කෙනෙක් ඉස්සරහින් යනවා", lambda v: v > 0.8)):
+                               ("shake", "jerk / shake", lambda v: v > 2.5), ("pan", "jerk (ඉක්මන් pan)", lambda v: v > 1.0), ("walk", "කෙනෙක් ඉස්සරහින් යනවා", lambda v: v > 0.8)):
             ml = 0.8 if key == "walk" else min_len
             v = p.get(key)
             if v is None:
@@ -98,6 +144,11 @@ def _merge_into(committed: list, new: list):
             committed[-1]["end"] = s["end"]
         else:
             committed.append(dict(s))
+
+
+def fmt_t(t: float) -> str:
+    t = int(round(t))
+    return f"{t // 3600}:{t % 3600 // 60:02d}:{t % 60:02d}" if t >= 3600 else f"{t // 60:02d}:{t % 60:02d}"
 
 
 def run(project: dict, event: str = "auto", out_dir: str = "out", overrides: dict | None = None,
@@ -142,15 +193,29 @@ def run(project: dict, event: str = "auto", out_dir: str = "out", overrides: dic
     audio = sequence_audio(project, t0, t1, beatmod.SR, progress=lambda f: prog("audio", 0.5 * f))
     beats = dbeats = np.zeros(0)
     beat_period = None
+    rolls = []
     music = np.zeros(int(t1 - t0) + 1)
     ph = (np.zeros(0), np.zeros(0))
     if len(audio) > beatmod.SR * 2 and np.abs(audio).max() > 0:
         if preset.grid in ("beats", "auto"):
-            b, _tempos, strength = beatmod.detect_beats(audio, progress=lambda f: prog("audio", 0.5 + 0.3 * f))
+            # song by song: each song its own tempo, bars and phrases
+            b, strength, songs = beatmod.detect_beats_songs(audio, progress=lambda f: prog("audio", 0.5 + 0.3 * f))
             beats = b + t0
-            dbeats = beatmod.downbeats(beats, strength)
+            dbeats = np.concatenate([beatmod.downbeats(beats[(beats >= s["start"] + t0) & (beats < s["end"] + t0)],
+                                                       strength[(beats >= s["start"] + t0) & (beats < s["end"] + t0)])
+                                     for s in songs]) if songs and len(beats) else beatmod.downbeats(beats, strength)
+            if len(songs) > 1:
+                log("  සින්දු " + str(len(songs)) + ": " + ", ".join(
+                    f"{fmt_t(s['start'] + t0)} ~{s['bpm']:.0f} BPM" for s in songs if s["bpm"] > 0))
             if len(b) > 2:
                 beat_period = float(np.median(np.diff(b)))
+            if getattr(preset, "roll_cuts", False):
+                rolls = beatmod.detect_rolls(audio, b)
+                for r in rolls:
+                    r["start"] += t0; r["end"] += t0; r["land"] += t0
+                    r["hits"] = [h + t0 for h in r["hits"]]
+                if rolls:
+                    log(f"  beat rolls {len(rolls)} (cuts roll එකට ගැලපෙන්න)")
         prog("audio", 0.8)
         if preset.grid in ("phrases", "auto"):
             pt, ps = phrase_points(audio, beatmod.SR)
@@ -227,9 +292,9 @@ def run(project: dict, event: str = "auto", out_dir: str = "out", overrides: dic
         if w1 - commit_t < preset.min_shot + lookahead and not final:
             continue
         bounds, weight = build_cut_grid(commit_t, w1, preset, beats, dbeats, ph,
-                                        music[int(commit_t - t0):] if len(music) else None)
+                                        music[int(commit_t - t0):] if len(music) else None, rolls=rolls)
         bs = block_scores(scores, times, bounds)
-        choice = choose(bs, bounds, weight, preset, prev_cam, final=final)
+        choice = choose(bs, bounds, weight, preset, prev_cam, final=final, rolls=rolls, beat_period=beat_period)
         segs, _ = to_segments(choice, bounds, bs, preset)
         limit = w1 if final else w1 - lookahead
         new = [s for s in segs if s["end"] <= limit + 1e-6]
@@ -279,11 +344,20 @@ def run(project: dict, event: str = "auto", out_dir: str = "out", overrides: dic
     qc = {}
     try:
         from .audio_qc import run_qc
-        qc = run_qc(project, t0, t1, preset.id, mix16, dead, bool(ex.get("silence")), False)
+        qc = run_qc(project, t0, t1, preset.id, mix16, dead, bool(ex.get("silence")), False,
+                     silence_min=float(ex.get("silence_min") or 0.9))
         qc["moments"] = _moments(mix16, t0, times, _parts, final_segs)
         qc["bad"] = _weak_takes(times, _parts, project)
+        qc["jumps"] = _jump_cuts(times, analysis, final_segs)
     except Exception as e:  # noqa: BLE001
         log(f"  checks මඟ හැරියා: {e}")
+    if getattr(preset, "ritual_marks", False) and len(mix16) > 16000 * 10:
+        try:
+            qc["rituals"] = _rituals(mix16, t0)
+            if qc["rituals"]:
+                log(f"  පෝරුවේ කොටස් {len(qc['rituals'])} (ගාථා / බෙර / අත්පොළසන් / නිහඬ)")
+        except Exception as e:  # noqa: BLE001
+            log(f"  පෝරුවේ කොටස් මඟ හැරියා: {e}")
     prog("qc", 1.0)
     lens = [s["end"] - s["start"] for s in final_segs]
     result = {
@@ -303,6 +377,10 @@ def run(project: dict, event: str = "auto", out_dir: str = "out", overrides: dic
             result["markers"].append({"time": m["time"], "name": f"Moment: {m.get('kind', '')}"})
         for b in result.get("bad") or []:
             result["markers"].append({"time": b["start"], "name": f"Weak take: {b.get('name', '')} ({b.get('why', '')})"})
+        for j in result.get("jumps") or []:
+            result["markers"].append({"time": j["time"], "name": "Jump cut?"})
+        for r in result.get("rituals") or []:
+            result["markers"].append({"time": r["start"], "name": r["label"]})
         for c in (result.get("clipping") or [])[:40]:
             result["markers"].append({"time": c["start"], "name": f"Audio clipping: {c.get('name', '')}"})
         for g in (result.get("mic_gaps") or [])[:40]:
