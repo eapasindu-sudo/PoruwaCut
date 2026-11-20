@@ -17,7 +17,7 @@ import traceback
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import __version__
+from . import license, __version__
 from . import project as proj
 from .media import nvdec_available, FFMPEG
 from .faces import FaceDetector
@@ -343,6 +343,8 @@ def api(method: str, path: str, body: dict | None = None):
         if r is not None:
             return r
     if method == "GET":
+        if path == "/api/license":
+            return 200, license.status()
         if path == "/api/presets":
             return 200, {"events": presets.listing()}
         if path == "/api/ping":
@@ -379,6 +381,8 @@ def api(method: str, path: str, body: dict | None = None):
         if path == "/api/learned":
             return 200, _learned()
     elif method == "POST":
+        if path == "/api/update/install" and not license.is_valid():
+            return 402, {"error": "Updates ලැබෙන්නේ valid license එකක් තියෙද්දී විතරයි. " + license.PRICE}
         if path == "/api/update/install":
             if any(j.get("status") in ("queued", "running") for j in JOBS.values()):
                 return 409, {"status": "error", "message": "Edit එකක් run වෙනවා. ඉවර වුණාම update කරන්න."}
@@ -439,6 +443,18 @@ def api(method: str, path: str, body: dict | None = None):
             elif job.get("status") == "queued":
                 job["status"] = "cancelled"
             return 200, {"ok": True}
+        if path == "/api/license/activate":
+            return 200, license.activate(str(body.get("key") or ""))
+        if path == "/api/license/trial":
+            return 200, license.start_trial()
+        if path == "/api/license/refresh":
+            return 200, license.refresh(force=True)
+        if path == "/api/license/remove":
+            return 200, license.remove()
+        # no licence: nothing that edits, syncs or analyses runs
+        if path in ("/api/edit", "/api/sync", "/api/events", "/api/learn") and not license.is_valid():
+            st = license.status()
+            return 402, {"error": st.get("message") or "License එකක් නැහැ.", "license": st}
         if path == "/api/notify":
             # phone notification through ntfy.sh (free app; subscribe to the same topic on the phone)
             topic = "".join(ch for ch in str(body.get("topic") or "") if ch.isalnum() or ch in "-_")[:64]
@@ -715,6 +731,12 @@ def serve(host="127.0.0.1", port=7788):
         print(f"Port {port} දැනටමත් භාවිතයේ - PoruwaCut engine එකක් දැනටමත් run වෙනවා.", flush=True)
         return
     print(f"AutoWed engine (Powered by Endora) {__version__}  ->  http://{host}:{port}", flush=True)
+    try:
+        license.start_background_refresh()
+        st = license.status()
+        print(f"  License: {'OK' if st.get('ok') else 'නැහැ'}  {st.get('plan') or ''} {st.get('expires') or ''}", flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"  License check: {e}", flush=True)
     print(f"  GPU decode (NVDEC): {'ON' if nvdec_available() else 'OFF'}   face detector: {FaceDetector().kind}"
           f"   ffmpeg: {FFMPEG}", flush=True)
     print("  මේ window එක open කරලා තියන්න. Premiere panel එක හෝ browser එකෙන් භාවිතා කරන්න.", flush=True)

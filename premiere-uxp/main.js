@@ -67,12 +67,19 @@ async function httpCall(base, method, path, body) {
 async function call(method, path, body, timeoutMs = 8000) {
   if (transport !== "file") {
     for (const base of transport === "http" ? [engineBase] : ENGINES) {
-      try { const j = await httpCall(base, method, path, body); transport = "http"; engineBase = base; return j; }
-      catch (e) { lastNetErr = String(e); }
+      let j;
+      try { j = await httpCall(base, method, path, body); transport = "http"; engineBase = base; }
+      catch (e) { lastNetErr = String(e); continue; }
+      return licGuard(j);
     }
   }
   const j = await fileCall(method, path, body, timeoutMs);
   transport = "file";
+  return licGuard(j);
+}
+// an engine answer that says "no licence" opens the licence screen
+function licGuard(j) {
+  if (j && j.license && j.error && typeof showLicense === "function") { showLicense(j.license); throw new Error(j.error); }
   return j;
 }
 
@@ -119,6 +126,7 @@ async function ping() {
     $("eng").className = "ok";
     if ($("rdot")) { $("rdot").className = "ok"; $("rdot").title = "engine v" + p.version; }
     if (!$("event").options.length) loadEvents();
+    if (!LIC_CHECKED) { LIC_CHECKED = true; checkLicense(); }
     return true;
   } catch (e) {
     $("eng").textContent = "engine offline";
@@ -2379,3 +2387,53 @@ if ($("ntfytest")) $("ntfytest").onclick = async () => {
   const ok = await notifyPhone("AutoWed test", "Phone notifications වැඩ ✔", "bell");
   log(ok ? `Test notification එක යැව්වා (topic: ${($("x_ntfy") && $("x_ntfy").value) || ntfyTopic()}).` : "Notification එක යවන්න බැරි වුණා (internet / topic බලන්න).", ok ? "ok" : "bad");
 };
+
+// ---------- licence ----------
+let LIC_CHECKED = false, LIC = null;
+function showLicense(st) {
+  LIC = st || LIC;
+  if ($("licov")) $("licov").style.display = "flex";
+  if ($("licmsg")) $("licmsg").textContent = (st && st.message) || "License key එක දාන්න, නැත්නම් free trial එක පටන් ගන්න.";
+  if ($("licpc")) $("licpc").textContent = st && st.machine ? "PC ID: " + st.machine : "";
+}
+function hideLicense() { if ($("licov")) $("licov").style.display = "none"; }
+function renderLicInfo(st) {
+  if (!$("licinfo")) return;
+  if (!st || !st.ok) { $("licinfo").textContent = "නැහැ"; return; }
+  $("licinfo").textContent = st.plan === "trial"
+    ? `Free trial · ${st.expires} දක්වා (දවස් ${st.days_left})`
+    : `${st.name ? st.name + " · " : ""}${st.key} · ${st.expires} දක්වා (දවස් ${st.days_left})`;
+}
+async function checkLicense() {
+  let st = null;
+  try { st = await call("GET", "/api/license"); } catch (e) { return; }
+  LIC = st;
+  renderLicInfo(st);
+  if (!st || !st.ok) { showLicense(st); return; }
+  hideLicense();
+  if (st.days_left <= 14) log(`License එක ${st.expires} දින expire වෙනවා (දවස් ${st.days_left}). Renew කරන්න: ${st.price}`, "warn");
+}
+async function licActivate() {
+  const key = (($("lickey") && $("lickey").value) || "").trim().toUpperCase();
+  if (!/^AW-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(key)) { $("licmsg").textContent = "Key එක AW-XXXX-XXXX-XXXX විදිහට දාන්න."; return; }
+  $("licmsg").textContent = "Activate කරනවා…";
+  const r = await call("POST", "/api/license/activate", { key });
+  if (r && r.ok) { hideLicense(); renderLicInfo(r); log(`✔ License activate කළා · ${r.expires} දක්වා. ස්තූතියි!`, "ok"); }
+  else $("licmsg").textContent = (r && r.message) || "Activate කරන්න බැරි වුණා.";
+}
+async function licTrial() {
+  $("licmsg").textContent = "Trial එක පටන් ගන්නවා…";
+  const r = await call("POST", "/api/license/trial", {});
+  if (r && r.ok) { hideLicense(); renderLicInfo(r); log(`Free trial එක පටන් ගත්තා · ${r.expires} දක්වා.`, "ok"); }
+  else $("licmsg").textContent = (r && r.message) || "Trial එක පටන් ගන්න බැරි වුණා.";
+}
+if ($("licact")) $("licact").onclick = () => licActivate().catch((e) => { $("licmsg").textContent = String(e && e.message || e); });
+if ($("lictrial")) $("lictrial").onclick = () => licTrial().catch((e) => { $("licmsg").textContent = String(e && e.message || e); });
+if ($("licrefresh")) $("licrefresh").onclick = async () => {
+  try { const st = await call("POST", "/api/license/refresh", {}); renderLicInfo(st); if (!st.ok) showLicense(st); else log("License එක OK ✔", "ok"); }
+  catch (e) { log("License check: " + (e && e.message || e), "bad"); }
+};
+if ($("licremove")) $("licremove").onclick = async () => {
+  try { const st = await call("POST", "/api/license/remove", {}); renderLicInfo(st); showLicense(st); } catch (e) {}
+};
+setInterval(() => { if (LIC_CHECKED) checkLicense().catch(() => {}); }, 3600 * 1000);

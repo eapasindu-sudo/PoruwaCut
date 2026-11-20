@@ -97,9 +97,34 @@
   #foot .go.dis { background:#2c2d34; color:#6f7078; }
   #foot .stopbtn { width:80px; background:#a8423a; color:#ffffff; margin-right:8px; }
   #foot .resetbtn { width:64px; background:#1f2026; border:1px solid #2c2d34 !important; color:#c4c5cc; font-size:11px; }
+
+  #licov { position:fixed; left:0; top:0; right:0; bottom:0; background:#121316; z-index:50; display:flex; align-items:center; justify-content:center; }
+  .licbox { width:300px; padding:22px; background:#1b1c21; border:1px solid #2c2d34; border-radius:12px; display:flex; flex-direction:column; align-items:stretch; }
+  .liclogo { width:40px; height:40px; border-radius:10px; background:#b48cff; color:#121316; font-weight:800; font-size:20px; display:flex; align-items:center; justify-content:center; margin-bottom:10px; }
+  .lictitle { font-size:18px; font-weight:700; color:#fff; }
+  .licsub { font-size:11px; color:#8d8e96; margin-bottom:12px; }
+  .licmsg { font-size:12px; color:#e9c46a; margin:4px 0 10px; }
+  #lickey { font-size:14px; padding:8px; margin-bottom:8px; letter-spacing:1px; }
+  .licbtn { text-align:center; padding:10px; border-radius:8px; cursor:pointer; margin-bottom:8px; background:#26272e; color:#e5e6eb; font-weight:600; font-size:13px; }
+  .licbtn.primary { background:#b48cff; color:#121316; }
+  .licnote { font-size:11px; color:#8d8e96; margin-top:4px; }
 </style>
 </head>
 <body>
+<div id="licov" style="display:none">
+  <div class="licbox">
+    <div class="liclogo">A</div>
+    <div class="lictitle">AutoWed License</div>
+    <div class="licsub">Powered by Endora</div>
+    <div id="licmsg" class="licmsg"></div>
+    <input id="lickey" type="text" placeholder="AW-XXXX-XXXX-XXXX" maxlength="24">
+    <div id="licact" class="licbtn primary">Activate</div>
+    <div id="lictrial" class="licbtn">Free trial (දවස් 7)</div>
+    <div id="licprice" class="licnote">LKR 10,000 / year · updates ඇතුළුව · PC 1</div>
+    <div class="licnote">License key එකක් ගන්න: www.endoraweddingfilms.com</div>
+    <div id="licpc" class="licnote"></div>
+  </div>
+</div>
 <div id="app">
   <nav id="rail">
     <div id="logo">A</div>
@@ -176,6 +201,8 @@
         <div class="row"><label data-i18n="l_min">අවම shot (s)</label><input id="min_shot" type="text" placeholder="auto"></div>
         <div class="row"><label data-i18n="l_max">උපරිම shot (s)</label><input id="max_shot" type="text" placeholder="auto"></div>
         <div class="row"><label data-i18n="l_trim">Smart trim</label><select id="x_trim"><option value="on" data-i18n="o_on">ඔව් (හිස් මුල/අග off)</option><option value="off" data-i18n="o_off">එපා</option></select></div>
+        <div class="row"><label>License</label><span id="licinfo" class="mute">…</span></div>
+        <div class="btnrow"><button id="licrefresh">License check</button><button id="licremove">License අයින් කරන්න</button></div>
         <div class="row"><label>Phone notify</label><select id="x_ntfy_on"><option value="on" selected>ON</option><option value="off">OFF</option></select></div>
         <div class="row"><label>ntfy topic</label><input id="x_ntfy" type="text" style="width:150px"><button id="ntfytest">Test</button></div>
         <div class="hint">Phone එකේ <b>ntfy</b> app එක (free) install කරලා මේ topic එකට subscribe කරන්න. Edit එකක් ඉවර වුණාම notification එකක් එනවා.</div>
