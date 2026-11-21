@@ -36,7 +36,12 @@ for name, im in imgs:
         det = cv2.FaceDetectorYN.create(F.YUNET_PATH, "", (wid, h), 0.6, 0.3, 50)
         _, fc = det.detect(fr)
         fc = np.zeros((0, 15), np.float32) if fc is None else fc
-        fg = F._ort_yunet(sess, fr)
+        try:
+            fg = F._ort_yunet(sess, fr)
+        except Exception as e:  # noqa: BLE001
+            print(f"{name} {wid}px: ort error {e}")
+            ok = False
+            continue
         same = F._same_faces(fc, fg) and F._same_faces(fg, fc) and len(fc) == len(fg)
         err = 0.0
         if same and len(fc):

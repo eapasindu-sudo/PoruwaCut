@@ -111,15 +111,30 @@ def _yunet_decode(outs, out_names, pw: int, ph: int, score_thr=0.6, nms_thr=0.3,
 
 
 def _ort_yunet(sess, bgr: np.ndarray) -> np.ndarray:
+    """YuNet on onnxruntime. The 2023mar model has a fixed 640x640 input: the frame goes in the
+    top-left corner on black (same as OpenCV's padding to a multiple of 32), smaller first if needed."""
     h, w = bgr.shape[:2]
-    pw, ph = ((w - 1) // 32 + 1) * 32, ((h - 1) // 32 + 1) * 32
+    shp = sess.get_inputs()[0].shape
+    fixed = len(shp) == 4 and isinstance(shp[2], int) and isinstance(shp[3], int)
+    scale = 1.0
+    if fixed:
+        ph, pw = int(shp[2]), int(shp[3])
+        if w > pw or h > ph:
+            scale = min(pw / w, ph / h)
+            bgr = cv2.resize(bgr, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_AREA)
+            h, w = bgr.shape[:2]
+    else:
+        pw, ph = ((w - 1) // 32 + 1) * 32, ((h - 1) // 32 + 1) * 32
     pad = np.zeros((ph, pw, 3), np.float32)
     pad[:h, :w] = bgr
     blob = pad.transpose(2, 0, 1)[None]
     names = [o.name for o in sess.get_outputs()]
     with _GPU["lock"]:
         outs = sess.run(names, {sess.get_inputs()[0].name: blob})
-    return _yunet_decode(outs, names, pw, ph)
+    f = _yunet_decode(outs, names, pw, ph)
+    if scale != 1.0 and len(f):
+        f[:, :14] /= scale
+    return f
 
 
 def _iou(a, b) -> float:
