@@ -57,6 +57,93 @@ RITUAL_LABEL = {"chant": "ගාථා / පිරිත්", "drums": "බෙ�
                 "quiet": "නිහඬ මොහොත"}
 
 
+def _color_match(analysis, segs, project):
+    """Per-camera RGB gains that bring each camera to the main camera's colour.
+
+    Skin tones of the biggest face are the reference both cameras share (the couple, the speaker);
+    without enough faces the picture centre is used, white balance only and gentler. Gains are
+    damped and limited so a wrong guess can never ruin a shot. Applied in Premiere as Color Balance (RGB).
+    """
+    cams = analysis["cams"]
+    C = len(cams)
+    used = {c: float(sum(s["end"] - s["start"] for s in segs if s["cam"] == c)) for c in range(C)}
+    if C < 2 or not any(used.values()):
+        return None
+    ref = max(used, key=used.get)
+
+    def med(c, src):
+        a = cams[c]
+        ok = np.isfinite(a[src + "_b"]) & np.isfinite(a[src + "_g"]) & np.isfinite(a[src + "_r"])
+        if "clip_hi" in a:
+            ok &= ~(np.nan_to_num(a["clip_hi"], nan=1.0) > 0.08)
+        n = int(ok.sum())
+        if n == 0:
+            return None, 0
+        return np.array([np.median(a[src + "_r"][ok]), np.median(a[src + "_g"][ok]), np.median(a[src + "_b"][ok])]), n
+
+    out = []
+    for c in range(C):
+        if c == ref or used[c] < 5.0:
+            continue
+        src = None
+        for cand, need in (("skin", 25), ("img", 60)):
+            mr, nr = med(ref, cand)
+            mc, nc = med(c, cand)
+            if mr is not None and mc is not None and min(nr, nc) >= need and mc.min() > 8:
+                src = cand
+                break
+        if src is None:
+            continue
+        g = mr / mc
+        if src == "img":                       # different framing: white balance only, half strength
+            g = g / g.mean()
+            g = 1.0 + 0.5 * (g - 1.0)
+        else:
+            g = 1.0 + 0.75 * (g - 1.0)
+        g = np.clip(g, 0.8, 1.25)
+        if np.abs(g - 1.0).max() < 0.03:
+            continue
+        out.append({"cam": c, "name": project["cameras"][c]["name"], "track": project["cameras"][c].get("track"),
+                    "rgb": [round(float(v) * 100, 1) for v in g], "source": src, "samples": int(min(nr, nc))})
+    return {"ref": ref, "ref_name": project["cameras"][ref]["name"], "cams": out}
+
+
+def _thumbs(project, segs, result, limit: int = 48):
+    """Small pictures for the panel's review list: {key: data-URI}. Key = "<list>:<index>"."""
+    import base64
+    from concurrent.futures import ThreadPoolExecutor
+
+    from .media import frame_jpeg
+
+    def cam_at(t):
+        for sg in segs:
+            if sg["start"] <= t < sg["end"]:
+                return sg["cam"]
+        return -1
+    want = []
+    for i, b in enumerate(result.get("bad") or []):
+        want.append((f"bad:{i}", b.get("cam", cam_at(b["start"])), (b["start"] + b["end"]) / 2))
+    for i, j in enumerate(result.get("jumps") or []):
+        want.append((f"jump:{i}", cam_at(j["time"] + 0.2), j["time"] + 0.2))
+    for i, d in enumerate(result.get("dead") or []):
+        want.append((f"dead:{i}", cam_at((d["start"] + d["end"]) / 2), (d["start"] + d["end"]) / 2))
+    for i, m in enumerate(result.get("moments") or []):
+        want.append((f"mom:{i}", m.get("cam", cam_at(m["time"])), m["time"]))
+    want = [w for w in want if w[1] is not None and w[1] >= 0][:limit]
+
+    def one(x):
+        key, c, t = x
+        for cl in project["cameras"][c]["clips"]:
+            if cl["tl_start"] <= t < cl["tl_end"]:
+                b = frame_jpeg(cl["path"], t - cl["offset"])
+                return key, ("data:image/jpeg;base64," + base64.b64encode(b).decode()) if b else None
+        return key, None
+    if not want:
+        return {}
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        return {k: v for k, v in ex.map(one, want) if v}
+
+
 def _rituals(mix16, t0):
     """Poruwa: the parts of the ceremony from its sound (chanting, drums, applause, quiet moments)."""
     from .events_detect import KINDS, classify
@@ -302,6 +389,9 @@ def run(project: dict, event: str = "auto", out_dir: str = "out", overrides: dic
     commit_t, prev_cam = t0, None
     wins = list(np.arange(t0, t1, window))
     detectors = set()
+    from .analyze import timing_reset, timing_text
+    from .faces import gpu_status
+    timing_reset()
     times = np.zeros(0)
     scores = np.zeros((C, 0))
     # look-ahead: while one window is scored and cut, the next windows are already being analysed
@@ -370,6 +460,11 @@ def run(project: dict, event: str = "auto", out_dir: str = "out", overrides: dic
         pre.shutdown(wait=False, cancel_futures=True)
     log(f"  face detector: {', '.join(sorted(detectors))} · decode: {decode_mode()} · fps {analysis_fps:g} · parallel {workers}"
         + (f" · look-ahead {ahead}" if pre is not None else ""))
+    if "yunet" in detectors:
+        log(f"  faces: {gpu_status()}")
+    tt = timing_text()
+    if tt:
+        log(f"  analysis වෙලාව: {tt}")
 
     # ---- weak stretches (all cameras poor) -------------------------------------------------
     prog("cuts", 0.0)
@@ -408,6 +503,18 @@ def run(project: dict, event: str = "auto", out_dir: str = "out", overrides: dic
         qc["jumps"] = _jump_cuts(times, analysis, final_segs)
     except Exception as e:  # noqa: BLE001
         log(f"  checks මඟ හැරියා: {e}")
+    try:
+        cm = _color_match(analysis, final_segs, project)
+        if cm is not None:
+            qc["color"] = cm
+            if cm["cams"]:
+                for x in cm["cams"]:
+                    log(f"  Color match ({'skin tones' if x['source'] == 'skin' else 'scene'}, {x['samples']}): {x['name']} → "
+                        f"R {x['rgb'][0]:g}% · G {x['rgb'][1]:g}% · B {x['rgb'][2]:g}% ({cm['ref_name']} එකට)")
+            else:
+                log(f"  Color match: කැමරා දැනටමත් එක වගේ ({cm['ref_name']} එකට)")
+    except Exception as e:  # noqa: BLE001
+        log(f"  color match මඟ හැරියා: {e}")
     if getattr(preset, "ritual_marks", False) and len(mix16) > 16000 * 10:
         try:
             qc["rituals"] = _rituals(mix16, t0)
@@ -428,6 +535,10 @@ def run(project: dict, event: str = "auto", out_dir: str = "out", overrides: dic
                   "beats": int(len(beats)), "phrase_points": int(len(ph[0])),
                   "seconds": round(time.time() - t_start, 1)},
     }
+    try:
+        result["thumbs"] = _thumbs(project, final_segs, result)
+    except Exception as e:  # noqa: BLE001
+        log(f"  review pictures මඟ හැරියා: {e}")
     if ex.get("qc_markers"):
         # the new timeline carries the checks as markers (its times are mapped past trims / silences)
         for m in result.get("moments") or []:

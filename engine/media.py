@@ -155,6 +155,17 @@ def iter_frames(path: str, start: float, duration: float, fps: float, width: int
         # this mode produced nothing -> try the next one
 
 
+def frame_jpeg(path: str, t: float, width: int = 200, timeout: float = 20.0) -> bytes | None:
+    """One small JPEG of the frame at file time t (review list thumbnails)."""
+    cmd = [FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "error", "-ss", f"{max(0.0, t):.3f}", "-i", path,
+           "-frames:v", "1", "-an", "-vf", f"scale={width}:-2", "-q:v", "6", "-f", "image2pipe", "-vcodec", "mjpeg", "-"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, stdin=subprocess.DEVNULL, timeout=timeout, **NOWIN)
+        return r.stdout if r.returncode == 0 and len(r.stdout) > 200 else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def decode_mode() -> str:
     return _DECODE_MODE or "?"
 

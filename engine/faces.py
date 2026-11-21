@@ -1,7 +1,13 @@
-"""Face detection: YuNet (accurate, uses CUDA if OpenCV was built with it) with Haar fallback."""
+"""Face detection: YuNet (accurate) with Haar fallback.
+
+GPU: when onnxruntime with CUDA or DirectML is present, YuNet and SFace run on the graphics card.
+The GPU path checks itself against OpenCV on the first frames with faces and turns itself off if
+the two disagree, so a driver / runtime problem can only cost speed, never wrong results.
+"""
 from __future__ import annotations
 
 import os
+import threading
 
 import cv2
 import numpy as np
@@ -10,6 +16,125 @@ from .paths import MODELS_DIR
 
 YUNET_PATH = os.path.join(MODELS_DIR, "face_detection_yunet_2023mar.onnx")
 SFACE_PATH = os.path.join(MODELS_DIR, "face_recognition_sface_2021dec.onnx")
+
+
+# ---------------------------------------------------------------- GPU (onnxruntime) ----------
+_GPU = {"tried": False, "det": None, "rec": None, "kind": "cpu", "state": None, "agree": 0, "lock": threading.Lock(),
+        "why": ""}
+_GPU_CHECK_FACES = 6        # frames with faces that must match OpenCV before the GPU is trusted alone
+
+
+def _ort_sessions(use_gpu: bool):
+    """(yunet session, sface session, provider name) or Nones. Made once, shared by all threads."""
+    g = _GPU
+    with g["lock"]:
+        if g["tried"]:
+            return g["det"], g["rec"], g["kind"]
+        g["tried"] = True
+        if not use_gpu or os.environ.get("AUTOWED_FACE_GPU", "1") == "0":
+            g["why"] = "off"
+            return None, None, "cpu"
+        try:
+            import onnxruntime as ort  # noqa: PLC0415
+        except Exception as e:  # noqa: BLE001
+            g["why"] = f"onnxruntime නැහැ ({type(e).__name__})"
+            return None, None, "cpu"
+        names = {"CUDAExecutionProvider": "cuda", "DmlExecutionProvider": "directml"}
+        avail = ort.get_available_providers()
+        for prov in ("CUDAExecutionProvider", "DmlExecutionProvider"):
+            if prov not in avail:
+                continue
+            try:
+                so = ort.SessionOptions()
+                so.log_severity_level = 3
+                so.enable_mem_pattern = False                      # required by DirectML
+                so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+                det = ort.InferenceSession(YUNET_PATH, so, providers=[prov, "CPUExecutionProvider"]) \
+                    if os.path.exists(YUNET_PATH) else None
+                rec = ort.InferenceSession(SFACE_PATH, so, providers=[prov, "CPUExecutionProvider"]) \
+                    if os.path.exists(SFACE_PATH) else None
+                if det is None:
+                    continue
+                if prov not in det.get_providers():
+                    continue                                       # silently fell back to CPU
+                g["det"], g["rec"], g["kind"] = det, rec, names[prov]
+                g["state"] = "checking"
+                return det, rec, g["kind"]
+            except Exception as e:  # noqa: BLE001
+                g["why"] = f"{names[prov]}: {e}"[:160]
+        if not g["why"]:
+            g["why"] = "GPU provider නැහැ (" + ", ".join(avail) + ")"
+        return None, None, "cpu"
+
+
+def gpu_status() -> str:
+    """For the log: which device runs the face networks."""
+    g = _GPU
+    if g["kind"] != "cpu" and g["state"] in ("checking", "ok"):
+        return f"GPU ({g['kind']})" + (" ✔" if g["state"] == "ok" else "")
+    if g["state"] == "bad":
+        return "CPU (GPU එක OpenCV එක්ක එකඟ වුණේ නැහැ: " + g["why"] + ")"
+    return "CPU" + (f" ({g['why']})" if g["why"] and g["why"] != "off" else "")
+
+
+def _yunet_decode(outs, out_names, pw: int, ph: int, score_thr=0.6, nms_thr=0.3, top_k=50):
+    """Same post-processing as cv::FaceDetectorYN (YuNet 2023mar): rows [x,y,w,h, 10 landmarks, score]."""
+    o = dict(zip(out_names, outs))
+    rows = []
+    for s in (8, 16, 32):
+        cols, rws = pw // s, ph // s
+        cls = np.clip(o[f"cls_{s}"].reshape(-1), 0, 1)
+        obj = np.clip(o[f"obj_{s}"].reshape(-1), 0, 1)
+        score = np.sqrt(cls * obj)
+        keep = np.nonzero(score >= score_thr)[0]
+        if not len(keep):
+            continue
+        bb = o[f"bbox_{s}"].reshape(-1, 4)[keep]
+        kp = o[f"kps_{s}"].reshape(-1, 10)[keep]
+        c = (keep % cols).astype(np.float32)
+        r = (keep // cols).astype(np.float32)
+        cx, cy = (c + bb[:, 0]) * s, (r + bb[:, 1]) * s
+        w, h = np.exp(bb[:, 2]) * s, np.exp(bb[:, 3]) * s
+        f = np.zeros((len(keep), 15), np.float32)
+        f[:, 0], f[:, 1], f[:, 2], f[:, 3] = cx - w / 2, cy - h / 2, w, h
+        for n in range(5):
+            f[:, 4 + 2 * n] = (kp[:, 2 * n] + c) * s
+            f[:, 5 + 2 * n] = (kp[:, 2 * n + 1] + r) * s
+        f[:, 14] = score[keep]
+        rows.append(f)
+    if not rows:
+        return np.zeros((0, 15), np.float32)
+    f = np.concatenate(rows)
+    idx = cv2.dnn.NMSBoxes(f[:, :4].tolist(), f[:, 14].tolist(), score_thr, nms_thr, top_k=top_k)
+    idx = np.array(idx).reshape(-1)
+    return f[idx] if len(idx) else np.zeros((0, 15), np.float32)
+
+
+def _ort_yunet(sess, bgr: np.ndarray) -> np.ndarray:
+    h, w = bgr.shape[:2]
+    pw, ph = ((w - 1) // 32 + 1) * 32, ((h - 1) // 32 + 1) * 32
+    pad = np.zeros((ph, pw, 3), np.float32)
+    pad[:h, :w] = bgr
+    blob = pad.transpose(2, 0, 1)[None]
+    names = [o.name for o in sess.get_outputs()]
+    with _GPU["lock"]:
+        outs = sess.run(names, {sess.get_inputs()[0].name: blob})
+    return _yunet_decode(outs, names, pw, ph)
+
+
+def _iou(a, b) -> float:
+    x0, y0 = max(a[0], b[0]), max(a[1], b[1])
+    x1, y1 = min(a[0] + a[2], b[0] + b[2]), min(a[1] + a[3], b[1] + b[3])
+    i = max(0.0, x1 - x0) * max(0.0, y1 - y0)
+    return i / max(1e-6, a[2] * a[3] + b[2] * b[3] - i)
+
+
+def _same_faces(f1: np.ndarray, f2: np.ndarray) -> bool:
+    """Every clear face (score >= 0.75) of f1 has a face in f2 at the same place (both are >= 0.6)."""
+    for a in f1[f1[:, 14] >= 0.75]:
+        if not any(_iou(a, b) > 0.75 for b in f2):
+            return False
+    return True
 
 
 class FaceDetector:
@@ -36,13 +161,37 @@ class FaceDetector:
             self._size = (w, h)
         return self.det
 
+    def _cv_full(self, bgr: np.ndarray) -> np.ndarray:
+        h, w = bgr.shape[:2]
+        _, faces = self._yunet(w, h).detect(bgr)
+        return np.zeros((0, 15), np.float32) if faces is None else faces.astype(np.float32)
+
     def detect_full(self, bgr: np.ndarray) -> np.ndarray:
         """YuNet rows [x, y, w, h, 5 landmark pairs, score] (15 values); empty for other detectors."""
         if self.kind != "yunet":
             return np.zeros((0, 15), np.float32)
-        h, w = bgr.shape[:2]
-        _, faces = self._yunet(w, h).detect(bgr)
-        return np.zeros((0, 15), np.float32) if faces is None else faces.astype(np.float32)
+        g = _GPU
+        sess = _ort_sessions(self.use_gpu)[0] if g["state"] != "bad" else None
+        if sess is None or g["state"] == "bad":
+            return self._cv_full(bgr)
+        try:
+            fg = _ort_yunet(sess, bgr)
+        except Exception as e:  # noqa: BLE001
+            g["state"], g["why"] = "bad", f"run: {e}"[:160]
+            return self._cv_full(bgr)
+        if g["state"] == "ok":
+            return fg
+        # still checking: OpenCV is the answer, the GPU result must match it
+        fc = self._cv_full(bgr)
+        with g["lock"]:
+            if g["state"] == "checking":
+                if not _same_faces(fc, fg) or not _same_faces(fg, fc):
+                    g["state"], g["why"] = "bad", "faces වෙනස්"
+                elif len(fc[fc[:, 14] >= 0.75]):
+                    g["agree"] += 1
+                    if g["agree"] >= _GPU_CHECK_FACES:
+                        g["state"] = "ok"
+        return fc
 
     def detect(self, bgr: np.ndarray, full: np.ndarray | None = None) -> np.ndarray:
         """Return array of faces: [x, y, w, h, score] in pixel coords."""
@@ -130,7 +279,26 @@ class FaceRecognizer:
             return None
         try:
             aligned = self.rec.alignCrop(bgr, face_row)
-            e = self.rec.feature(aligned).reshape(-1).astype(np.float32)
+            e = None
+            g = _GPU
+            sess = g["rec"] if g["state"] in ("checking", "ok") else None
+            if sess is not None:
+                try:
+                    blob = cv2.dnn.blobFromImage(aligned, 1.0, (112, 112), (0, 0, 0), True, False)
+                    with g["lock"]:
+                        e = sess.run(None, {sess.get_inputs()[0].name: blob})[0]
+                    e = e.reshape(-1).astype(np.float32)
+                    if g["state"] == "checking":     # compare with OpenCV until the detector is trusted
+                        ec = self.rec.feature(aligned).reshape(-1).astype(np.float32)
+                        cos = float(ec @ e / (np.linalg.norm(ec) * np.linalg.norm(e) + 1e-9))
+                        if cos < 0.98:
+                            g["rec"], g["why"] = None, f"sface cos {cos:.2f}"
+                        e = ec
+                except Exception as ex:  # noqa: BLE001
+                    g["rec"], g["why"] = None, f"sface: {ex}"[:160]
+                    e = None
+            if e is None:
+                e = self.rec.feature(aligned).reshape(-1).astype(np.float32)
             return e / (np.linalg.norm(e) + 1e-9)
         except Exception:  # noqa: BLE001
             return None

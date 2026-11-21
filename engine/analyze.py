@@ -8,6 +8,8 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import cv2
@@ -18,11 +20,12 @@ from .media import iter_frames, probe
 
 METRICS = ["sharp", "bright", "clip_hi", "clip_lo", "dx", "dy", "phase_resp",
            "local_change", "edges", "faces", "face_area", "face_central", "face_score", "pair_central",
-           "smile", "hug", "couple", "walk", "talk"]
+           "smile", "hug", "couple", "walk", "talk",
+           "skin_b", "skin_g", "skin_r", "img_b", "img_g", "img_r"]
 
 ANALYSIS_WIDTH = 480
 SMALL_WIDTH = 160
-VERSION = "7"
+VERSION = "8"
 # the couple's face embeddings (found by find_couple before the analysis), used for the "couple" metric
 COUPLE = {"centroids": None, "key": ""}
 
@@ -30,6 +33,27 @@ COUPLE = {"centroids": None, "key": ""}
 def set_couple(centroids):
     COUPLE["centroids"] = None if centroids is None or len(centroids) == 0 else np.asarray(centroids, np.float32)
     COUPLE["key"] = "" if COUPLE["centroids"] is None else hashlib.sha1(COUPLE["centroids"].tobytes()).hexdigest()[:8]
+# where the analysis time goes (all threads together), for the log: decode / picture / faces
+TIMING = {"decode": 0.0, "picture": 0.0, "faces": 0.0, "frames": 0}
+_TIMING_LK = threading.Lock()
+
+
+def timing_reset():
+    with _TIMING_LK:
+        for k in TIMING:
+            TIMING[k] = 0
+
+
+def timing_text() -> str:
+    t = dict(TIMING)
+    tot = t["decode"] + t["picture"] + t["faces"]
+    if tot <= 0 or not t["frames"]:
+        return ""
+    pc = lambda v: f"{100 * v / tot:.0f}%"  # noqa: E731
+    return (f"decode {pc(t['decode'])} · picture {pc(t['picture'])} · faces {pc(t['faces'])}"
+            f" · {1000 * tot / t['frames']:.1f} ms/frame")
+
+
 CHUNK_LEN = 60.0  # seconds per analysed segment (smaller = smoother live progress)
 
 
@@ -55,7 +79,13 @@ def _analyze_chunk(path: str, start: float, length: float, fps: float, use_gpu: 
     bg = None          # slow background of a still camera, to see someone walking in front of it
     bg_busy = 0
     bg_age = 0
+    t_dec = t_pic = t_face = 0.0
+    nfr = 0
+    t_mark = time.perf_counter()
     for t, frame in iter_frames(path, start, length, fps, ANALYSIS_WIDTH, use_gpu):
+        t_now = time.perf_counter()
+        t_dec += t_now - t_mark
+        nfr += 1
         k = int(round((t - start) * fps))
         if k >= n:
             break
@@ -113,8 +143,25 @@ def _analyze_chunk(path: str, start: float, length: float, fps: float, use_gpu: 
                     bg, bg_busy = small.copy(), 0
         prev_small = small
 
+        t_f0 = time.perf_counter()
+        t_pic += t_f0 - t_now
         if k % 2 == 0 or last_face is None:  # faces change slowly: detect on every 2nd frame
             full = det.detect_full(frame) if det.kind == "yunet" else None
+            # colour of the picture centre and of the biggest face (skin): used to match the cameras' colours
+            cm = frame[int(h * .2):int(h * .8), int(w * .2):int(w * .8)].reshape(-1, 3).mean(axis=0)
+            out["img_b"][k], out["img_g"][k], out["img_r"][k] = float(cm[0]), float(cm[1]), float(cm[2])
+            if full is not None and len(full):
+                fb = full[np.argsort(-(full[:, 2] * full[:, 3]))[0]]
+                if fb[2] * fb[3] > 0.004 * w * h and fb[14] >= 0.75:
+                    sx0, sx1 = int(max(0, fb[0] + 0.25 * fb[2])), int(min(w, fb[0] + 0.75 * fb[2]))
+                    sy0, sy1 = int(max(0, fb[1] + 0.40 * fb[3])), int(min(h, fb[1] + 0.85 * fb[3]))
+                    if sx1 - sx0 >= 4 and sy1 - sy0 >= 4:
+                        px = frame[sy0:sy1, sx0:sx1].reshape(-1, 3).astype(np.float32)
+                        lum = px.mean(axis=1)
+                        px = px[(lum > 20) & (lum < 235)]         # no blown or black pixels
+                        if len(px) >= 12:
+                            sk = px.mean(axis=0)
+                            out["skin_b"][k], out["skin_g"][k], out["skin_r"][k] = float(sk[0]), float(sk[1]), float(sk[2])
             ff = face_features(det.detect(frame, full), w, h)
             sm, hg = smile_and_hug(full, w, h) if full is not None else (0.0, 0.0)
             cp = 0.0
@@ -158,6 +205,13 @@ def _analyze_chunk(path: str, start: float, length: float, fps: float, use_gpu: 
         out["faces"][k], out["face_area"][k] = c, area
         out["face_central"][k], out["face_score"][k] = central, score
         out["pair_central"][k] = pair
+        t_mark = time.perf_counter()
+        t_face += t_mark - t_f0
+    with _TIMING_LK:
+        TIMING["decode"] += t_dec
+        TIMING["picture"] += t_pic
+        TIMING["faces"] += t_face
+        TIMING["frames"] += nfr
     out["_detector"] = np.array(det.kind)
     return out
 

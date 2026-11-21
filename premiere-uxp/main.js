@@ -1541,6 +1541,7 @@ async function finish(project, kind, sd, nest, nestInfo, applier, cams, result, 
     }
     // camera colors were put on while cutting (project item label, see withLabel): no close/reopen
     await stabilizePieces(project, sd, cams, result, "stacked");
+    try { await colorMatch(project, sd, cams, result); } catch (e) { log("Color match: " + (e && e.message || e), "warn"); }
     let proj = project;
     if (LABEL_OF_TRACK) {
       try { const n = await applier.recolor(); log(`Camera colors දැම්මා (Premiere close නොකර)${n ? ` · clip මුල් ${n}` : ""}.`, "ok"); } catch (e) {}
@@ -2023,6 +2024,106 @@ async function findEvents() {
 // =====================================================================================
 // Stabilize: Warp Stabilizer on the chosen pieces that are still shaky
 // =====================================================================================
+// Camera colour match: the engine measures each camera against the main one (skin tones of the faces,
+// else the scene) and sends RGB gains; here every used piece of that camera gets a "Color Balance (RGB)"
+// effect with those gains. Our effect is named "AutoWed color", so a second run updates it instead of
+// stacking another one. Safe: if the effect or its parameters are not what we expect, nothing is changed.
+const COLOR_TAG = "AutoWed color";
+let COLOR_MATCH_NAME = null;
+async function colorEffectName() {
+  if (COLOR_MATCH_NAME) return COLOR_MATCH_NAME;
+  const F = ppro.VideoFilterFactory;
+  if (!F || typeof F.createComponent !== "function") return null;
+  try {
+    const mn = await F.getMatchNames();
+    const dn = await F.getDisplayNames();
+    let i = dn.findIndex((d) => /color balance \(rgb\)/i.test(d));
+    if (i < 0) i = mn.findIndex((m) => /colou?r ?balance/i.test(m) && /rgb/i.test(m));
+    if (i >= 0) COLOR_MATCH_NAME = mn[i];
+  } catch (e) {}
+  return COLOR_MATCH_NAME;
+}
+function rgbParams(comp) {
+  const n = comp.getParamCount();
+  const ps = {};
+  for (let i = 0; i < n; i++) {
+    const p = comp.getParam(i);
+    const d = String(p.displayName || "").toLowerCase();
+    if (!ps.r && /^red\b|\bred$/.test(d)) ps.r = p;
+    else if (!ps.g && /^green\b|\bgreen$/.test(d)) ps.g = p;
+    else if (!ps.b && /^blue\b|\bblue$/.test(d)) ps.b = p;
+  }
+  return ps.r && ps.g && ps.b ? ps : null;
+}
+async function paramNumber(p) {
+  try { const k = await p.getStartValue(); const v = k && k.value; return typeof v === "number" ? v : (v && typeof v.value === "number" ? v.value : null); }
+  catch (e) { return null; }
+}
+async function colorMatch(project, sd, cams, result) {
+  const mode = ($("x_color") || {}).value || "on";
+  const cm = result.color;
+  if (mode === "off" || !cm || !cm.cams || !cm.cams.length) return;
+  const match = await colorEffectName();
+  if (!match) { log("Color match: 'Color Balance (RGB)' effect එක මේ Premiere එකේ හම්බුණේ නැහැ. Gains log එකේ තියෙනවා, අතින් දාන්න පුළුවන්.", "warn"); return; }
+  const [r0, r1] = result.range;
+  let done = 0, failed = 0, checked = false;
+  for (const x of cm.cams) {
+    const c = cams[x.cam];
+    if (!c) continue;
+    let items = [];
+    try {
+      const seq = await freshSeq(project, sd.seq, sd.guid);
+      items = (await itemsOf(await seq.getVideoTrack(c.track))).filter((o) => o.b > r0 + 0.01 && o.a < r1 - 0.01);
+      const en = [];
+      for (const o of items) { try { if (!(await o.it.isDisabled())) en.push(o); } catch (e) { en.push(o); } }
+      items = en;
+    } catch (e) { log("Color match: " + (e && e.message || e), "warn"); continue; }
+    for (const o of items) {
+      if (STOPPING) return;
+      try {
+        let chain = await o.it.getComponentChain();
+        let comp = null;
+        for (let i = chain.getComponentCount() - 1; i >= 0; i--) {
+          const k = chain.getComponentAtIndex(i);
+          try { if ((await k.getInstanceName()) === COLOR_TAG) { comp = k; break; } } catch (e) {}
+        }
+        if (!comp) {
+          const nc = await ppro.VideoFilterFactory.createComponent(match);
+          if (!transact(project, "AutoWed color", () => [chain.createAppendComponentAction(nc)])) throw new Error("effect එක දාන්න බැරි වුණා");
+          chain = await o.it.getComponentChain();
+          comp = chain.getComponentAtIndex(chain.getComponentCount() - 1);
+          try { transact(project, "AutoWed color", () => [comp.createSetInstanceNameAction(COLOR_TAG)]); } catch (e) {}
+        }
+        const ps = rgbParams(comp);
+        if (!ps) throw new Error("Red / Green / Blue parameters හම්බුණේ නැහැ");
+        if (!checked) {
+          // the neutral value must be 100 (%): otherwise this is not the effect we think, change nothing more
+          const v = await paramNumber(ps.g);
+          if (v != null && (v < 50 || v > 200)) {
+            log(`Color match නැවැත්තුවා: '${match}' Green = ${v} (100 බලාපොරොත්තු වුණා).`, "warn");
+            try { transact(project, "AutoWed color", () => [chain.createRemoveComponentAction(comp)]); } catch (e) {}
+            return;
+          }
+          checked = true;
+        }
+        const ok = transact(project, "AutoWed color", () => [
+          ps.r.createSetValueAction(ps.r.createKeyframe(x.rgb[0]), true),
+          ps.g.createSetValueAction(ps.g.createKeyframe(x.rgb[1]), true),
+          ps.b.createSetValueAction(ps.b.createKeyframe(x.rgb[2]), true)]);
+        if (!ok) throw new Error("values දාන්න බැරි වුණා");
+        done++;
+      } catch (e) {
+        failed++;
+        if (failed === 1) log("Color match: " + (e && e.message || e), "warn");
+        if (failed >= 5 && !done) { log("Color match නැවැත්තුවා (effect එක දාන්න බැහැ).", "warn"); return; }
+      }
+      await breathe();
+    }
+    log(`Color match: ${x.name} → R ${x.rgb[0]}% · G ${x.rgb[1]}% · B ${x.rgb[2]}% (${cm.ref_name} එකට, ${x.source === "skin" ? "skin tones" : "scene"}) · කෑලි ${items.length}`, "ok");
+  }
+  if (failed) log(`Color match: කෑලි ${failed}කට බැරි වුණා.`, "warn");
+}
+
 const NO_STAB_EVENTS = new Set(["dance_floor", "surprise_dance"]);   // handheld moving to the music is wanted
 async function stabilizePieces(project, sd, cams, result, kind) {
   const mode = ($("stab") || {}).value || "off";
@@ -2097,7 +2198,7 @@ async function qcReportOnly(result) {
 }
 
 async function qcReport(project, sd, result, cams, kind) {
-  try { renderMoments(result); } catch (e) {}
+  try { renderMoments(result, sd && sd.guid); } catch (e) {}
   const L = result.loudness;
   if (L) log(`Loudness: ${L.lufs} LUFS (ඉලක්කය ${L.target}) → ${L.gain_db > 0 ? "+" : ""}${L.gain_db} dB${gatherExtras().loudness ? " copy sequence එකේ දැම්මා" : ""}`, "mute");
   if (result.trim) log(`Smart trim: ${fmt(result.range[0])}–${fmt(result.trim[0])} සහ ${fmt(result.trim[1])}–${fmt(result.range[1])} හිස් කොටස් off කළා.`, "ok");
@@ -2195,7 +2296,7 @@ async function showStats() {
 }
 
 // studio presets: every panel setting, saved as a file others can copy (Documents\AutoWed Presets)
-const PRESET_IDS = ["event", "etype", "x_live", "x_audon", "x_alink", "min_shot", "max_shot", "stab", "stab_thr", "x_sil", "x_flash", "x_trim", "x_trans", "x_loud", "x_mic", "x_couple", "x_qc"];
+const PRESET_IDS = ["event", "etype", "x_live", "x_audon", "x_alink", "min_shot", "max_shot", "stab", "stab_thr", "x_sil", "x_flash", "x_trim", "x_trans", "x_loud", "x_mic", "x_couple", "x_qc", "x_color"];
 let STUDIO = [];
 async function presetsRefresh(quiet) {
   try {
@@ -2318,25 +2419,83 @@ try { const k = localStorage.getItem("autowed.kind"); if (k) $("etype").value = 
 renderKind();
 
 // moments & checks after an edit, in the Edit page
-function renderMoments(result) {
+// ---------- review list: every check, moment and cut of the last edit; click = go there ----------
+let REVIEW = null;
+function reviewItems(result) {
+  const KIND = { applause: "අත්පොළසන් / cheer", smile: "සිනහ", hug: "බදාගැනීම / emotion" };
+  const th = result.thumbs || {};
+  const it = [];
+  (result.bad || []).forEach((b, i) => it.push({ key: "bad:" + i, grp: "chk", t: b.start, end: b.end, col: "#e8a04a", txt: `⚠ ${b.name}: ${b.why}`, img: th["bad:" + i] }));
+  (result.jumps || []).forEach((j, i) => it.push({ key: "jump:" + i, grp: "chk", t: j.time, col: "#e8c84a", txt: `⚠ Jump cut? ${j.why || ""}`, img: th["jump:" + i] }));
+  (result.dead || []).forEach((d, i) => it.push({ key: "dead:" + i, grp: "chk", t: d.start, end: d.end, col: "#e8685a", txt: "⚠ කැමරා ඔක්කොම දුර්වලයි", img: th["dead:" + i] }));
+  (result.clipping || []).forEach((c, i) => it.push({ key: "clip:" + i, grp: "chk", t: c.start, end: c.end, col: "#e8685a", txt: `⚠ Audio clipping ${c.name || ""}` }));
+  (result.mic_gaps || []).forEach((g, i) => it.push({ key: "mic:" + i, grp: "chk", t: g.start, end: g.end, col: "#e8a04a", txt: `⚠ Mic drop-out ${g.name || ""}` }));
+  (result.moments || []).forEach((m, i) => it.push({ key: "mom:" + i, grp: "mom", t: m.time, col: "#b48cff", txt: `★ ${KIND[m.kind] || m.kind}${m.cam != null ? " · Cam " + (m.cam + 1) : ""}`, img: th["mom:" + i] }));
+  (result.rituals || []).forEach((r, i) => it.push({ key: "rit:" + i, grp: "mom", t: r.start, end: r.end, col: "#5ac8c8", txt: `◆ ${r.label}` }));
+  (result.segments || []).forEach((sg, i) => { if (i > 0 && sg.cam >= 0) it.push({ key: "cut:" + i, grp: "cut", t: sg.start, col: "#9a9ba3", txt: `✂ Cam ${sg.cam + 1}${sg.end - sg.start < 1.2 ? " (කෙටියි)" : ""}` }); });
+  it.sort((a, b) => a.t - b.t);
+  return it;
+}
+function renderMoments(result, seqGuid) {
   const box = $("mlist");
   if (!box) return;
-  box.innerHTML = "";
-  const KIND = { applause: "අත්පොළසන් / cheer", smile: "සිනහ", hug: "බදාගැනීම / emotion" };
-  const items = [];
-  for (const m of result.moments || []) items.push(["★ " + (KIND[m.kind] || m.kind) + (m.cam != null ? " · Cam " + (m.cam + 1) : ""), m.time, "#b48cff"]);
-  for (const b of (result.bad || []).slice(0, 8)) items.push(["! " + b.name + ": " + b.why, b.start, "#e8a04a"]);
-  for (const c of (result.clipping || []).slice(0, 4)) items.push(["! Audio clipping " + c.name, c.start, "#e8685a"]);
-  for (const g of (result.mic_gaps || []).slice(0, 4)) items.push(["! Mic drop-out " + g.name, g.start, "#e8a04a"]);
-  items.sort((a, b) => a[1] - b[1]);
+  let seen = [];
+  try { const o = JSON.parse(localStorage.getItem("autowed.review") || "{}"); if (o.guid === seqGuid && o.range && result.range && Math.abs(o.range[0] - result.range[0]) < 0.5) seen = o.seen || []; } catch (e) {}
+  const items = reviewItems(result);
+  const grp = ["chk", "mom", "cut"].find((g) => items.some((x) => x.grp === g)) || "chk";
+  REVIEW = { guid: seqGuid || null, range: result.range, items, grp, seen: new Set(seen) };
   if ($("t_mom")) $("t_mom").textContent = String((result.moments || []).length);
-  if (!items.length) { const d = document.createElement("div"); d.className = "mute"; d.textContent = "Moments / checks නැහැ."; box.appendChild(d); return; }
-  for (const [txt, t, col] of items.slice(0, 14)) {
-    const row = document.createElement("div"); row.className = "item";
-    const a = document.createElement("span"); a.textContent = txt; a.style.color = col;
-    const b = document.createElement("span"); b.textContent = fmt(t); b.className = "mute";
-    row.appendChild(a); row.appendChild(b); box.appendChild(row);
+  reviewRender();
+}
+function reviewSave() {
+  try { localStorage.setItem("autowed.review", JSON.stringify({ guid: REVIEW.guid, range: REVIEW.range, seen: [...REVIEW.seen] })); } catch (e) {}
+}
+function reviewRender() {
+  const box = $("mlist"), chips = $("rvchips");
+  if (!box || !REVIEW) return;
+  const n = (g) => REVIEW.items.filter((x) => x.grp === g).length;
+  if (chips) {
+    chips.innerHTML = "";
+    for (const [g, label] of [["chk", "Checks"], ["mom", "Moments"], ["cut", "Cuts"]]) {
+      const c = document.createElement("div");
+      const left = REVIEW.items.filter((x) => x.grp === g && !REVIEW.seen.has(x.key)).length;
+      c.className = "chip" + (REVIEW.grp === g ? " on" : "");
+      c.textContent = `${label} ${left}/${n(g)}`;
+      c.onclick = () => { REVIEW.grp = g; reviewRender(); };
+      chips.appendChild(c);
+    }
   }
+  box.innerHTML = "";
+  const list = REVIEW.items.filter((x) => x.grp === REVIEW.grp);
+  if (!list.length) { const d = document.createElement("div"); d.className = "mute"; d.textContent = "මෙතන බලන්න දෙයක් නැහැ."; box.appendChild(d); return; }
+  for (const x of list.slice(0, 250)) {
+    const row = document.createElement("div");
+    row.className = "rv" + (REVIEW.seen.has(x.key) ? " done" : "");
+    if (x.img) { const im = document.createElement("img"); im.src = x.img; row.appendChild(im); }
+    const tx = document.createElement("div"); tx.className = "tx";
+    const a = document.createElement("div"); a.textContent = x.txt; a.style.color = x.col;
+    const b = document.createElement("div"); b.className = "tm"; b.textContent = fmt(x.t) + (x.end ? " → " + fmt(x.end) : "");
+    tx.appendChild(a); tx.appendChild(b); row.appendChild(tx);
+    const ck = document.createElement("div"); ck.className = "ck"; ck.textContent = REVIEW.seen.has(x.key) ? "✓" : "";
+    ck.title = "බැලුවා";
+    ck.onclick = (ev) => { ev.stopPropagation(); if (REVIEW.seen.has(x.key)) REVIEW.seen.delete(x.key); else REVIEW.seen.add(x.key); reviewSave(); reviewRender(); };
+    row.appendChild(ck);
+    row.onclick = () => reviewGo(x).catch((e) => log("Review: " + (e && e.message || e), "warn"));
+    box.appendChild(row);
+  }
+  if (list.length > 250) { const d = document.createElement("div"); d.className = "mute"; d.textContent = `… තව ${list.length - 250}`; box.appendChild(d); }
+}
+async function reviewGo(x) {
+  const project = await ppro.Project.getActiveProject();
+  if (!project) return;
+  let seq = await project.getActiveSequence();
+  if (REVIEW.guid && (!seq || seq.guid.toString() !== REVIEW.guid)) {
+    const s = (await project.getSequences()).find((q) => q.guid.toString() === REVIEW.guid);
+    if (s) { await project.openSequence(s); await sleep(400); seq = await project.getActiveSequence(); }
+  }
+  if (!seq || typeof seq.setPlayerPosition !== "function") return;
+  await seq.setPlayerPosition(tt(Math.max(0, x.t)));
+  REVIEW.seen.add(x.key); reviewSave(); reviewRender();
 }
 
 // move to the page that shows what is running
