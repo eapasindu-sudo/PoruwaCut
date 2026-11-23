@@ -304,9 +304,8 @@ jobs:
 
       - name: Add Mac files to the GitHub Release
         if: steps.exists.outputs.exists == 'false'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ steps.ver.outputs.version }}
-          files: |
-            dist/AutoWed_*_mac.pkg
-            dist/AutoWed_*_mac.mcpb
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=${{ steps.ver.outputs.version }}
+          gh release upload "v$v" dist/AutoWed_${v}_mac.pkg dist/AutoWed_${v}_mac.mcpb --clobber --repo "${{ github.repository }}"
