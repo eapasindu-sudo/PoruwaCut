@@ -21,11 +21,12 @@ from .media import iter_frames, probe
 METRICS = ["sharp", "bright", "clip_hi", "clip_lo", "dx", "dy", "phase_resp",
            "local_change", "edges", "faces", "face_area", "face_central", "face_score", "pair_central",
            "smile", "hug", "couple", "walk", "talk",
-           "skin_b", "skin_g", "skin_r", "img_b", "img_g", "img_r"]
+           "skin_b", "skin_g", "skin_r", "img_b", "img_g", "img_r",
+           "people", "person_h", "shot_scale", "away"]
 
 ANALYSIS_WIDTH = 480
 SMALL_WIDTH = 160
-VERSION = "8"
+VERSION = "9"
 # the couple's face embeddings (found by find_couple before the analysis), used for the "couple" metric
 COUPLE = {"centroids": None, "key": ""}
 
@@ -74,6 +75,10 @@ def _analyze_chunk(path: str, start: float, length: float, fps: float, use_gpu: 
     prev_small = None
     win = None
     last_face = None
+    from .vision import PersonDetector, shot_features
+    pdet = PersonDetector()
+    last_shot = None
+    last_full = None
     mouth_box = None      # mouth area of the biggest face (from the last detection)
     prev_mouth = None
     bg = None          # slow background of a still camera, to see someone walking in front of it
@@ -147,6 +152,7 @@ def _analyze_chunk(path: str, start: float, length: float, fps: float, use_gpu: 
         t_pic += t_f0 - t_now
         if k % 2 == 0 or last_face is None:  # faces change slowly: detect on every 2nd frame
             full = det.detect_full(frame) if det.kind == "yunet" else None
+            last_full = full
             # colour of the picture centre and of the biggest face (skin): used to match the cameras' colours
             cm = frame[int(h * .2):int(h * .8), int(w * .2):int(w * .8)].reshape(-1, 3).mean(axis=0)
             out["img_b"][k], out["img_g"][k], out["img_r"][k] = float(cm[0]), float(cm[1]), float(cm[2])
@@ -205,6 +211,14 @@ def _analyze_chunk(path: str, start: float, length: float, fps: float, use_gpu: 
         out["faces"][k], out["face_area"][k] = c, area
         out["face_central"][k], out["face_score"][k] = central, score
         out["pair_central"][k] = pair
+        # people & shot size (AI person detector): ~1 frame a second is plenty, it changes slowly
+        if pdet.net is not None and (k % 5 == 0 or last_shot is None):
+            try:
+                last_shot = shot_features(pdet.detect(frame), last_full, w, h)
+            except Exception:  # noqa: BLE001
+                last_shot = None
+        if last_shot is not None:
+            out["people"][k], out["person_h"][k], out["shot_scale"][k], out["away"][k] = last_shot
         t_mark = time.perf_counter()
         t_face += t_mark - t_f0
     with _TIMING_LK:

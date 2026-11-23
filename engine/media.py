@@ -5,6 +5,7 @@ import functools
 import json
 import os
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from fractions import Fraction
 
@@ -75,16 +76,31 @@ def probe(path: str) -> MediaInfo:
     )
 
 
+_HWACCELS: str | None = None
+
+
+def _hwaccels() -> str:
+    global _HWACCELS
+    if _HWACCELS is None:
+        try:
+            _HWACCELS = subprocess.run([FFMPEG, "-nostdin", "-hide_banner", "-hwaccels"], capture_output=True, text=True,
+                                       timeout=10, **NOWIN).stdout
+        except Exception:
+            _HWACCELS = ""
+    return _HWACCELS
+
+
 def nvdec_available() -> bool:
-    """True when ffmpeg can decode with CUDA (NVIDIA GPU)."""
+    """True when ffmpeg can decode on the GPU: CUDA (NVIDIA, Windows) or VideoToolbox (Mac)."""
     global _NVDEC_OK
     if _NVDEC_OK is None:
-        try:
-            r = subprocess.run([FFMPEG, "-nostdin", "-hide_banner", "-hwaccels"], capture_output=True, text=True, timeout=10, **NOWIN)
-            _NVDEC_OK = "cuda" in r.stdout
-        except Exception:
-            _NVDEC_OK = False
+        hw = _hwaccels()
+        _NVDEC_OK = ("videotoolbox" in hw) if sys.platform == "darwin" else ("cuda" in hw)
     return _NVDEC_OK
+
+
+def gpu_decode_name() -> str:
+    return "VideoToolbox" if sys.platform == "darwin" else "NVDEC"
 
 
 _DECODE_MODE: str | None = None  # remembered after the first success: "cuda_scale" | "cuda" | "cpu"
@@ -106,7 +122,13 @@ def iter_frames(path: str, start: float, duration: float, fps: float, width: int
 
     def _cmd(mode: str):
         c = [FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "error"]
-        if mode == "cuda_scale":
+        if mode == "vt_scale":       # Mac: decode + resize on the Apple GPU, only the small frame comes back
+            c += ["-hwaccel", "videotoolbox", "-hwaccel_output_format", "videotoolbox_vld"]
+            vf = f"fps={fps},scale_vt={width}:{h},hwdownload,format=nv12,format={pix}"
+        elif mode == "vt":
+            c += ["-hwaccel", "videotoolbox"]
+            vf = f"fps={fps},scale={width}:{h}:flags=area"
+        elif mode == "cuda_scale":
             c += ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
             vf = f"fps={fps},scale_cuda={width}:{h}:format=nv12,hwdownload,format=nv12,format={pix}"
         elif mode == "cuda":
@@ -124,7 +146,7 @@ def iter_frames(path: str, start: float, duration: float, fps: float, width: int
     if _DECODE_MODE:
         attempts = [_DECODE_MODE] + ([] if _DECODE_MODE == "cpu" else ["cpu"])
     elif use_gpu and nvdec_available():
-        attempts = ["cuda_scale", "cuda", "cpu"]
+        attempts = ["vt_scale", "vt", "cpu"] if sys.platform == "darwin" else ["cuda_scale", "cuda", "cpu"]
     else:
         attempts = ["cpu"]
     for mode in attempts:

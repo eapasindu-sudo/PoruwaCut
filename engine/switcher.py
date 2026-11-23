@@ -12,7 +12,7 @@ import numpy as np
 
 
 def build_cut_grid(t0: float, t1: float, preset, beats=None, downbeats=None, phrases=None,
-                   music=None, filler_step: float = 0.5, rolls=None):
+                   music=None, filler_step: float = 0.5, rolls=None, speech=None):
     """Return (bounds[T+1], weight[T+1]).  weight multiplies the switch cost at that boundary."""
     pts: dict[float, float] = {}
 
@@ -56,8 +56,17 @@ def build_cut_grid(t0: float, t1: float, preset, beats=None, downbeats=None, phr
         add(r["land"], 0.12)
     # filler slots: allowed but discouraged (so a bad shot can still be left mid-phrase / off-beat)
     filler_w = 3.0 if grid in ("beats", "phrases") else 2.2
+
+    def talking(t):
+        # speech = (start time, step, per-step probability) from the AI voice detection
+        if speech is None:
+            return False
+        s0, st, pr = speech
+        i = int((t - s0) / st)
+        return 0 <= i < len(pr) and pr[max(0, i - 2):i + 3].min() > 0.6   # in the middle of words
     for t in np.arange(t0 + filler_step, t1, filler_step):
-        add(t, filler_w)
+        # a slot in the middle of someone talking is a much worse place to cut than a pause
+        add(t, filler_w * (2.5 if (not is_music(t) and talking(t)) else 1.0))
     ks = sorted(pts)
     # merge points closer than 0.12 s (keep the preferred one)
     merged = []
@@ -95,7 +104,7 @@ def _roll_mask(bounds, rolls):
 
 
 def choose(bs: np.ndarray, bounds: np.ndarray, weight: np.ndarray, preset, prev_cam: int | None = None,
-           final: bool = True, rolls=None, beat_period=None) -> np.ndarray:
+           final: bool = True, rolls=None, beat_period=None, pair_extra=None) -> np.ndarray:
     """Semi-Markov DP with shot lengths in seconds. Returns camera index per block."""
     C, T = bs.shape
     cs = np.concatenate([np.zeros((C, 1)), np.cumsum(bs, axis=1)], axis=1).T  # [T+1, C]
@@ -106,6 +115,8 @@ def choose(bs: np.ndarray, bounds: np.ndarray, weight: np.ndarray, preset, prev_
     trans = np.full((C, C), preset.switch_cost)
     # re-starting the same camera = an over-long shot in disguise; only worth it when every other
     # camera is unusable (not recording / far worse)
+    if pair_extra is not None:
+        trans = trans + pair_extra      # e.g. two cameras with the same shot size: cutting between them looks like a jump
     np.fill_diagonal(trans, preset.switch_cost + 4.0 * preset.stay_cost)
     hard_max = preset.max_shot * 2.0
     # inside a drum roll shots may be as short as the roll's hits, and should not stay long

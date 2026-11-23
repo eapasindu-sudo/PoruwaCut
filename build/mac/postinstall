@@ -1,0 +1,39 @@
+#!/bin/bash
+# AutoWed Mac installer: runs as root after the files are copied.
+# - AutoWed Engine starts at login (LaunchAgent) and is (re)started now for the logged-in user
+# - the Premiere panel (.ccx) is installed with Adobe's own plugin installer (UPIA)
+APP="/Applications/AutoWed Engine.app"
+BIN="$APP/Contents/MacOS/PoruwaCutEngine"
+CCX="/Library/Application Support/AutoWed/PoruwaCut.ccx"
+PL="/Library/LaunchAgents/lk.endora.autowed.engine.plist"
+U=$(stat -f%Su /dev/console)
+UIDN=$(id -u "$U" 2>/dev/null || echo 501)
+
+# unsigned app: no "downloaded from the internet" prompt for the engine itself
+xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
+
+cat > "$PL" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>lk.endora.autowed.engine</string>
+  <key>ProgramArguments</key><array><string>$BIN</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>ProcessType</key><string>Interactive</string>
+</dict></plist>
+PLIST
+chown root:wheel "$PL"; chmod 644 "$PL"
+
+# stop the old engine, start the new one for the user who is logged in
+launchctl bootout "gui/$UIDN" "$PL" 2>/dev/null || true
+pkill -f "Contents/MacOS/PoruwaCutEngine" 2>/dev/null || true
+sleep 1
+launchctl bootstrap "gui/$UIDN" "$PL" 2>/dev/null || sudo -u "$U" open "$APP" || true
+
+# Premiere panel
+UPIA="/Library/Application Support/Adobe/Adobe Desktop Common/RemoteComponents/UPI/UnifiedPluginInstallerAgent/UnifiedPluginInstallerAgent.app/Contents/MacOS/UnifiedPluginInstallerAgent"
+if [ -x "$UPIA" ] && [ -f "$CCX" ]; then
+  sudo -u "$U" "$UPIA" --install "$CCX" >/tmp/autowed_upia.log 2>&1 || true
+fi
+exit 0

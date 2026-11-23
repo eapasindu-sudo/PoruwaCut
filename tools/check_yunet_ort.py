@@ -50,3 +50,39 @@ for name, im in imgs:
         print(f"{name} {wid}px: opencv {len(fc)} faces, ort {len(fg)} faces, same={same}, max diff {err:.3f}")
         ok = ok and same and err < 1.0
 print("YUNET ORT CHECK:", "PASS" if ok else "FAIL")
+
+# NanoDet people detector (AI shot size): count people on the test pictures
+try:
+    from engine import vision
+    if vision.available():
+        pd = vision.PersonDetector()
+        total = 0
+        for name, im in imgs:
+            fr = cv2.resize(im, (480, int(round(im.shape[0] * 480 / im.shape[1] / 2)) * 2))
+            ps = pd.detect(fr)
+            total += len(ps)
+            print(f"NANODET {name}: people {len(ps)}", [list(map(int, p[:4])) for p in ps[:4]],
+                  "features", vision.shot_features(ps, None, fr.shape[1], fr.shape[0]))
+        if imgs and total == 0:
+            print("NANODET CHECK: FAIL (no people found on pictures that have people)")
+            sys.exit(1)               # a broken people detector must not be released
+        print("NANODET CHECK: PASS")
+    else:
+        print("NANODET model missing")
+except SystemExit:
+    raise
+except Exception as e:  # noqa: BLE001
+    print("NANODET error", e)
+    sys.exit(1)
+
+# Silero VAD (AI voice detection)
+try:
+    from engine import vad
+    print("VAD available:", vad.available())
+    if vad.available():
+        sr = 16000
+        t = np.arange(sr * 3) / sr
+        p = vad.speech_prob((0.1 * np.sin(2 * np.pi * 220 * t)).astype(np.float32))
+        print("VAD on a tone (should be low):", float(p.max()))
+except Exception as e:  # noqa: BLE001
+    print("VAD error", e)

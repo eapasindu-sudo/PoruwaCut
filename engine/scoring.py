@@ -121,6 +121,10 @@ def score_cameras(analysis: dict, cfg: ModeConfig, beat_period: float | None = N
             a = np.asarray(c.get("face_area", []), np.float64)
             a = a[np.isfinite(a) & (a > 0)]
             size.append(float(np.median(np.sqrt(a))) if a.size >= 5 else 0.0)
+        # the AI shot size (people + faces) knows a wide shot even when nobody faces the camera
+        ss = [np.asarray(c.get("shot_scale", []), np.float64) for c in cams]
+        if all(np.isfinite(x).sum() >= 10 for x in ss):
+            size = [0.25 * float(np.nanmedian(x)) for x in ss]
         order = np.argsort(size)
         if size[order[1]] - size[order[0]] > 0.01:          # a clear wide camera
             wide_bias[order[0]] = cfg.w_wide
@@ -189,7 +193,16 @@ def score_cameras(analysis: dict, cfg: ModeConfig, beat_period: float | None = N
             talk = np.convolve(tk, np.ones(kk) / kk, mode="same")
         else:
             talk = np.zeros(N)
-        total = (cfg.w_sharp * sharp_s - cfg.w_exposure * exposure - cfg.w_shake * shake
+        # AI people detector: main person turned away from this camera / nobody in the shot
+        if "away" in c and np.isfinite(c["away"]).any():
+            away = gaussian_filter1d(_nan_fill(c["away"]), sig) * (nf <= 0)
+            ppl = _nan_fill(c["people"]) if "people" in c else np.ones(N)
+            empty = ((ppl <= 0) & (nf <= 0)).astype(np.float64)
+            empty = gaussian_filter1d(empty, sig)
+        else:
+            away = empty = np.zeros(N)
+        total = (- getattr(cfg, "w_away", 0.8) * away - getattr(cfg, "w_empty", 0.6) * empty
+                 + cfg.w_sharp * sharp_s - cfg.w_exposure * exposure - cfg.w_shake * shake
                  - cfg.w_pan * pan_pen - cfg.w_obstruct * obstruct - getattr(cfg, "w_walk", 3.0) * walk
                  + getattr(cfg, "w_talk", 0.0) * talk
                  + cfg.w_face * face

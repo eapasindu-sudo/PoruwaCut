@@ -19,7 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import license, __version__
 from . import project as proj
-from .media import nvdec_available, FFMPEG
+from .media import nvdec_available, gpu_decode_name, FFMPEG
 from .faces import FaceDetector
 from .pipeline import run
 from . import presets
@@ -737,7 +737,7 @@ def serve(host="127.0.0.1", port=7788):
         print(f"  License: {'OK' if st.get('ok') else 'නැහැ'}  {st.get('plan') or ''} {st.get('expires') or ''}", flush=True)
     except Exception as e:  # noqa: BLE001
         print(f"  License check: {e}", flush=True)
-    print(f"  GPU decode (NVDEC): {'ON' if nvdec_available() else 'OFF'}   face detector: {FaceDetector().kind}"
+    print(f"  GPU decode ({gpu_decode_name()}): {'ON' if nvdec_available() else 'OFF'}   face detector: {FaceDetector().kind}"
           f"   ffmpeg: {FFMPEG}", flush=True)
     print("  මේ window එක open කරලා තියන්න. Premiere panel එක හෝ browser එකෙන් භාවිතා කරන්න.", flush=True)
     threading.Thread(target=updater.check, daemon=True).start()  # warm the update cache

@@ -46,8 +46,12 @@ def check(force: bool = False) -> dict:
     try:
         rel = json.loads(_get(API))
         tag = rel.get("tag_name", "")
-        asset = next((a for a in rel.get("assets", [])
-                      if a["name"].lower().startswith(("autowed_setup", "poruwacut_setup")) and a["name"].lower().endswith(".exe")), None)
+        if sys.platform == "darwin":   # Mac: AutoWed_<ver>_mac.pkg
+            asset = next((a for a in rel.get("assets", [])
+                          if a["name"].lower().startswith("autowed_") and a["name"].lower().endswith("_mac.pkg")), None)
+        else:
+            asset = next((a for a in rel.get("assets", [])
+                          if a["name"].lower().startswith(("autowed_setup", "poruwacut_setup")) and a["name"].lower().endswith(".exe")), None)
         out["latest"] = tag.lstrip("vV")
         out["notes"] = (rel.get("body") or "")[:2000]
         if asset:
@@ -87,7 +91,8 @@ if ($exe -and $closed) {
 def _download_and_run(info: dict, exit_after: bool, close_premiere: bool = False, reopen: str | None = None):
     try:
         STATE.update(status="downloading", progress=0.0, message="Update download වෙනවා...", version=info["latest"])
-        dest = os.path.join(tempfile.gettempdir(), f"PoruwaCut_Setup_{info['latest']}.exe")
+        dest = os.path.join(tempfile.gettempdir(), f"AutoWed_{info['latest']}_mac.pkg" if sys.platform == "darwin"
+                            else f"PoruwaCut_Setup_{info['latest']}.exe")
         req = urllib.request.Request(info["url"], headers={"User-Agent": f"PoruwaCut/{__version__}"})
         h = hashlib.sha256()
         with urllib.request.urlopen(req, timeout=60) as r, open(dest + ".part", "wb") as f:
@@ -121,6 +126,11 @@ def _download_and_run(info: dict, exit_after: bool, close_premiere: bool = False
             else:
                 subprocess.Popen([dest, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS"],
                                  creationflags=flags, close_fds=True)
+        elif sys.platform == "darwin":
+            # the Mac installer asks for the password; its postinstall restarts the engine (LaunchAgent)
+            subprocess.Popen(["/usr/bin/open", dest], close_fds=True)
+            STATE.update(status="installing", message="Mac installer එක open වුණා: Continue / Install ඔබලා password එක දෙන්න.")
+            return
         else:
             STATE.update(status="downloaded", message=f"Windows නොවන නිසා install කළේ නැහැ: {dest}")
             return

@@ -12,6 +12,9 @@ import hashlib
 import json
 import os
 import platform
+import re
+import subprocess
+import sys
 import threading
 import time
 import urllib.request
@@ -28,8 +31,11 @@ _state: dict = {}
 
 
 def _data_dir() -> str:
-    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-    d = os.path.join(base, "PoruwaCut")
+    if os.name == "nt":
+        d = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "PoruwaCut")
+    else:
+        from .paths import DATA_DIR
+        d = DATA_DIR
     os.makedirs(d, exist_ok=True)
     return d
 
@@ -46,7 +52,15 @@ def machine_id() -> str:
                            winreg.KEY_READ | getattr(winreg, "KEY_WOW64_64KEY", 0))
         raw = winreg.QueryValueEx(k, "MachineGuid")[0]
     except Exception:
-        for f in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+        if sys.platform == "darwin":
+            try:  # the Mac's hardware UUID (stays the same through OS reinstalls)
+                out = subprocess.run(["/usr/sbin/ioreg", "-rd1", "-c", "IOPlatformExpertDevice"], capture_output=True,
+                                     text=True, timeout=10).stdout
+                m = re.search(r'"IOPlatformUUID"\s*=\s*"([^"]+)"', out)
+                raw = m.group(1) if m else ""
+            except Exception:
+                raw = ""
+        for f in () if raw else ("/etc/machine-id", "/var/lib/dbus/machine-id"):
             try:
                 raw = open(f).read().strip()
                 break

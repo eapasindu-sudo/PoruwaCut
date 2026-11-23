@@ -49,6 +49,18 @@ def _jump_cuts(times, analysis, segs):
         (fa, ca), (fb, cb) = look(a["cam"]), look(b["cam"])
         if fa > 0.05 and fb > 0.05 and abs(fa - fb) < 0.025 and abs(ca - cb) < 0.15:
             out.append({"time": float(t), "why": "framing එක සමානයි"})
+            continue
+
+        def shot(c):   # AI shot size + people count (also when nobody faces the camera)
+            if "shot_scale" not in cams[c]:
+                return None
+            s_ = np.asarray(cams[c]["shot_scale"][lo:hi], np.float64)
+            p_ = np.asarray(cams[c]["people"][lo:hi], np.float64)
+            s_, p_ = s_[np.isfinite(s_)], p_[np.isfinite(p_)]
+            return (float(np.median(s_)), float(np.median(p_))) if s_.size and p_.size else None
+        sa, sb = shot(a["cam"]), shot(b["cam"])
+        if sa and sb and abs(sa[0] - sb[0]) < 0.08 and sa[1] == sb[1] and 0 < sa[1] <= 3 and fa <= 0.05 and fb <= 0.05:
+            out.append({"time": float(t), "why": "shot size එක සමානයි"})
     return out
 
 
@@ -336,6 +348,23 @@ def run(project: dict, event: str = "auto", out_dir: str = "out", overrides: dic
     mix16 = resample_poly(audio, 16000, beatmod.SR).astype(np.float32) if len(audio) else np.zeros(0, np.float32)
     del audio
 
+    # ---- AI voice detection (Silero VAD): sentence ends + where people are talking -------------
+    speech = None
+    if preset.grid in ("phrases", "auto") and len(mix16) > 16000:
+        try:
+            from . import vad as vadmod
+            vp = vadmod.speech_prob(mix16)
+            if vp is not None:
+                segs_v = vadmod.speech_segments(vp)
+                vt, vs = vadmod.phrase_points(segs_v)
+                if len(vt):
+                    ph = (vt + t0, vs)
+                speech = (t0, vadmod.STEP, vp)
+                talk_pc = 100 * sum(b - a for a, b in segs_v) / max(1e-6, len(mix16) / 16000)
+                log(f"  AI voice detection: කතා කරන වෙලාව {talk_pc:.0f}% · වාක්‍ය ඉවර වෙන තැන් {len(vt)}")
+        except Exception as e:  # noqa: BLE001
+            log(f"  AI voice detection මඟ හැරියා: {e}")
+
     # ---- smart trim: empty head / tail of the range (decided from the audio) ------------------
     trim = None
     if ex.get("trim"):
@@ -436,9 +465,25 @@ def run(project: dict, event: str = "auto", out_dir: str = "out", overrides: dic
         if w1 - commit_t < preset.min_shot + lookahead and not final:
             continue
         bounds, weight = build_cut_grid(commit_t, w1, preset, beats, dbeats, ph,
-                                        music[int(commit_t - t0):] if len(music) else None, rolls=rolls)
+                                        music[int(commit_t - t0):] if len(music) else None, rolls=rolls, speech=speech)
         bs = block_scores(scores, times, bounds)
-        choice = choose(bs, bounds, weight, preset, prev_cam, final=final, rolls=rolls, beat_period=beat_period)
+        # cameras with the same shot size here (AI shot size): a cut between them looks like a jump
+        pair_extra = None
+        try:
+            sel = (times >= commit_t) & (times < w1)
+            med = [float(np.nanmedian(np.asarray(c["shot_scale"], np.float64)[sel]))
+                   if np.isfinite(np.asarray(c["shot_scale"], np.float64)[sel]).sum() >= 5 else np.nan
+                   for c in analysis["cams"]]
+            pe = np.zeros((C, C))
+            for a_ in range(C):
+                for b_ in range(C):
+                    if a_ != b_ and np.isfinite(med[a_]) and np.isfinite(med[b_]) and abs(med[a_] - med[b_]) < 0.1:
+                        pe[a_, b_] = 0.5 * preset.switch_cost
+            pair_extra = pe if pe.any() else None
+        except Exception:  # noqa: BLE001
+            pair_extra = None
+        choice = choose(bs, bounds, weight, preset, prev_cam, final=final, rolls=rolls, beat_period=beat_period,
+                        pair_extra=pair_extra)
         segs, _ = to_segments(choice, bounds, bs, preset)
         limit = w1 if final else w1 - lookahead
         new = [s for s in segs if s["end"] <= limit + 1e-6]
@@ -461,7 +506,8 @@ def run(project: dict, event: str = "auto", out_dir: str = "out", overrides: dic
     log(f"  face detector: {', '.join(sorted(detectors))} · decode: {decode_mode()} · fps {analysis_fps:g} · parallel {workers}"
         + (f" · look-ahead {ahead}" if pre is not None else ""))
     if "yunet" in detectors:
-        log(f"  faces: {gpu_status()}")
+        from . import vision as _vision
+        log(f"  faces: {gpu_status()} · AI people / shot size: {'ON' if _vision.available() else 'OFF (model නැහැ)'}")
     tt = timing_text()
     if tt:
         log(f"  analysis වෙලාව: {tt}")

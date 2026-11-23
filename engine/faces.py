@@ -39,9 +39,9 @@ def _ort_sessions(use_gpu: bool):
         except Exception as e:  # noqa: BLE001
             g["why"] = f"onnxruntime නැහැ ({type(e).__name__})"
             return None, None, "cpu"
-        names = {"CUDAExecutionProvider": "cuda", "DmlExecutionProvider": "directml"}
+        names = {"CUDAExecutionProvider": "cuda", "DmlExecutionProvider": "directml", "CoreMLExecutionProvider": "coreml"}
         avail = ort.get_available_providers()
-        for prov in ("CUDAExecutionProvider", "DmlExecutionProvider"):
+        for prov in ("CUDAExecutionProvider", "DmlExecutionProvider", "CoreMLExecutionProvider"):
             if prov not in avail:
                 continue
             try:

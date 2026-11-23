@@ -168,3 +168,145 @@ jobs:
             dist/AutoWed_*.ccx
             dist/AutoWed_*.mcpb
           generate_release_notes: true
+
+  # ------------------------------------------------------------------ Mac (Apple Silicon) -----
+  # AutoWed_<ver>_mac.pkg (engine app + ffmpeg + Premiere panel + login start) and AutoWed_<ver>_mac.mcpb.
+  # Unsigned (no Apple Developer ID): first install = right-click > Open. Runs after the Windows job
+  # and adds its files to the same Release.
+  mac:
+    needs: windows
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Stamp version
+        id: ver
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then v="${{ github.ref_name }}"; else v=$(tr -d '[:space:]' < VERSION); fi
+          python build/stamp_version.py "$v"
+
+      - name: Mac files already on the Release?
+        id: exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=${{ steps.ver.outputs.version }}
+          if gh release view "v$v" --repo "${{ github.repository }}" --json assets -q '.assets[].name' 2>/dev/null | grep -q "_mac.pkg"; then
+            echo "exists=true" >> $GITHUB_OUTPUT; echo "Mac pkg already published - build only"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller onnxruntime
+
+      - name: AI models
+        run: python setup_models.py
+
+      - name: AI checks (YuNet on onnxruntime, people detector, voice detection)
+        run: python tools/check_yunet_ort.py
+
+      - name: FFmpeg cache
+        id: ffcache
+        uses: actions/cache@v4
+        with:
+          path: build/ffmpeg
+          key: ffmpeg-7.1-lgpl-vt-arm64-v1
+
+      - name: FFmpeg (LGPL, VideoToolbox, built from source - no Homebrew libraries)
+        if: steps.ffcache.outputs.cache-hit != 'true'
+        run: |
+          curl -sSL https://ffmpeg.org/releases/ffmpeg-7.1.tar.xz -o ff.tar.xz
+          tar xf ff.tar.xz
+          cd ffmpeg-7.1
+          ./configure --disable-autodetect --disable-gpl --disable-nonfree --enable-videotoolbox --enable-audiotoolbox \
+            --enable-zlib --disable-doc --disable-ffplay --disable-debug --enable-static --disable-shared \
+            --extra-cflags="-mmacosx-version-min=12.0" --extra-ldflags="-mmacosx-version-min=12.0"
+          make -j"$(sysctl -n hw.ncpu)" ffmpeg ffprobe
+          mkdir -p ../build/ffmpeg
+          cp ffmpeg ffprobe ../build/ffmpeg/
+          cp COPYING.LGPLv2.1 ../build/ffmpeg/LICENSE.txt
+
+      - name: Check FFmpeg
+        run: |
+          otool -L build/ffmpeg/ffmpeg
+          if otool -L build/ffmpeg/ffmpeg | grep -E "/opt/homebrew|/usr/local"; then echo "links to Homebrew!"; exit 1; fi
+          build/ffmpeg/ffmpeg -hide_banner -hwaccels
+          build/ffmpeg/ffmpeg -hide_banner -filters | grep -E "scale_vt|hwdownload" || true
+
+      - name: Build engine app (PyInstaller)
+        run: >
+          pyinstaller --noconfirm --clean --onedir --windowed
+          --name PoruwaCutEngine --osx-bundle-identifier lk.endora.autowed.engine
+          --add-data "web:web" --add-data "models:models"
+          --collect-submodules engine
+          --collect-binaries onnxruntime
+          poruwacut_engine.py
+
+      - name: Build MCP binary (PyInstaller, standard library only)
+        run: pyinstaller --noconfirm --onefile --console --name AutoWedMCP autowed_mcp.py
+
+      - name: Smoke test the MCP binary
+        run: |
+          out=$(printf '%s\n%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | dist/AutoWedMCP)
+          echo "$out" | head -c 600
+          echo "$out" | grep -q premiere_get_sequence
+
+      - name: Smoke test the engine app
+        run: |
+          mkdir -p dist/PoruwaCutEngine.app/Contents/MacOS/ffmpeg
+          cp build/ffmpeg/ffmpeg build/ffmpeg/ffprobe dist/PoruwaCutEngine.app/Contents/MacOS/ffmpeg/
+          dist/PoruwaCutEngine.app/Contents/MacOS/PoruwaCutEngine > engine_stdout.log 2>&1 &
+          ok=0
+          for i in $(seq 1 40); do sleep 2; if curl -s http://127.0.0.1:7788/api/ping; then ok=1; break; fi; done
+          cat "$HOME/Library/Application Support/PoruwaCut/engine.log" 2>/dev/null | tail -20 || true
+          [ $ok = 1 ] || { cat engine_stdout.log; exit 1; }
+          export FFMPEG="$PWD/build/ffmpeg/ffmpeg"
+          python tools/make_test_footage.py testshoot
+          lic=$(curl -s -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:7788/api/license/trial)
+          echo "$lic"
+          echo "$lic" | grep -q '"ok": *true' || { echo "licence trial failed"; exit 1; }
+          body=$(python -c "import json,os; p=os.getcwd()+'/testshoot/'; print(json.dumps({'project':{'cams':[p+'cam1_master.mp4',p+'cam2_close.mp4',p+'cam3_side.mp4'],'master':1},'mode':'ceremony','options':{}}))")
+          job=$(curl -s -X POST -H 'Content-Type: application/json' -d "$body" http://127.0.0.1:7788/api/edit | python -c "import sys,json; print(json.load(sys.stdin)['job'])")
+          st=running
+          for i in $(seq 1 120); do
+            sleep 2
+            st=$(curl -s http://127.0.0.1:7788/api/job/$job | python -c "import sys,json; print(json.load(sys.stdin)['status'])")
+            [ "$st" != running ] && [ "$st" != queued ] && break
+          done
+          curl -s http://127.0.0.1:7788/api/job/$job | python -c "import sys,json; print('\n'.join(json.load(sys.stdin)['log']))"
+          curl -s -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:7788/api/license/remove > /dev/null || true
+          curl -s -X POST http://127.0.0.1:7788/api/quit > /dev/null || true
+          rm -rf dist/PoruwaCutEngine.app/Contents/MacOS/ffmpeg
+          [ "$st" = done ] || { echo "test edit failed: $st"; exit 1; }
+
+      - name: Package Premiere plugin (.ccx)
+        run: python build/make_ccx.py
+
+      - name: Package Claude extension (.mcpb)
+        run: python build/make_mcpb.py
+
+      - name: Build installer (.pkg)
+        run: bash build/make_mac_pkg.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AutoWed-mac-${{ steps.ver.outputs.version }}
+          path: |
+            dist/AutoWed_*_mac.pkg
+            dist/AutoWed_*_mac.mcpb
+
+      - name: Add Mac files to the GitHub Release
+        if: steps.exists.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          files: |
+            dist/AutoWed_*_mac.pkg
+            dist/AutoWed_*_mac.mcpb

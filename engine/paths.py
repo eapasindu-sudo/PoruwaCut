@@ -17,8 +17,11 @@ else:
 WEB_INDEX = os.path.join(RES_DIR, "web", "index.html")
 MODELS_DIR = os.path.join(RES_DIR, "models")
 
+IS_MAC = sys.platform == "darwin"
 if os.name == "nt":
     DATA_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "PoruwaCut")
+elif IS_MAC:
+    DATA_DIR = os.path.join(os.path.expanduser("~"), "Library", "Application Support", "PoruwaCut")
 else:
     DATA_DIR = os.path.join(os.path.expanduser("~"), ".poruwacut")
 os.makedirs(DATA_DIR, exist_ok=True)

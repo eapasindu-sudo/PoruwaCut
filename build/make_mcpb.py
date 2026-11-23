@@ -9,9 +9,11 @@ import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ver = open(os.path.join(ROOT, "VERSION"), encoding="utf-8").read().strip()
-exe = os.path.join(ROOT, "dist", "AutoWedMCP.exe")
+MAC = sys.platform == "darwin"
+EXE = "AutoWedMCP" if MAC else "AutoWedMCP.exe"
+exe = os.path.join(ROOT, "dist", EXE)
 if not os.path.exists(exe):
-    sys.exit("dist/AutoWedMCP.exe missing")
+    sys.exit(f"dist/{EXE} missing")
 sys.path.insert(0, ROOT)
 from autowed_mcp import TOOLS  # noqa: E402
 
@@ -27,17 +29,22 @@ manifest = {
     "author": {"name": "Endora"},
     "server": {
         "type": "binary",
-        "entry_point": "AutoWedMCP.exe",
-        "mcp_config": {"command": "${__dirname}/AutoWedMCP.exe", "args": []},
+        "entry_point": EXE,
+        "mcp_config": {"command": "${__dirname}/" + EXE, "args": []},
     },
     "tools": [{"name": t["name"], "description": t["description"]} for t in TOOLS],
-    "compatibility": {"platforms": ["win32"]},
+    "compatibility": {"platforms": ["darwin" if MAC else "win32"]},
     "license": "Proprietary",
 }
-out = os.path.join(ROOT, "dist", f"AutoWed_{ver}.mcpb")
+out = os.path.join(ROOT, "dist", f"AutoWed_{ver}_mac.mcpb" if MAC else f"AutoWed_{ver}.mcpb")
 with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
     z.writestr("manifest.json", json.dumps(manifest, indent=2))
-    z.write(exe, "AutoWedMCP.exe")
+    zi = zipfile.ZipInfo(EXE)
+    zi.external_attr = 0o100755 << 16        # keep the executable bit (Mac / unzip)
+    zi.compress_type = zipfile.ZIP_DEFLATED
+    with open(exe, "rb") as f:
+        z.writestr(zi, f.read())
 import shutil  # noqa: E402
-shutil.copy2(out, os.path.join(ROOT, "dist", "AutoWed.mcpb"))
+if not MAC:
+    shutil.copy2(out, os.path.join(ROOT, "dist", "AutoWed.mcpb"))
 print("wrote", out)
