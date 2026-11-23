@@ -81,10 +81,18 @@ class PersonDetector:
         blob = cv2.dnn.blobFromImage((img.astype(np.float32) - _MEAN) / _STD)
         self.net.setInput(blob)
         outs = self.net.forward(self.names)
+        # match outputs by shape, not by order (the order of the names differs between OpenCV versions):
+        # class scores have 80 columns, box distributions 4*(reg_max+1); rows = anchors of one stride
+        by = {}
+        for o in outs:
+            o2 = o.reshape(-1, o.shape[-1])
+            kind = "reg" if o2.shape[1] == 4 * (_REG_MAX + 1) else "cls"
+            by[(kind, o2.shape[0])] = o2
         boxes, scores = [], []
-        for stride, cls, reg, anc in zip(_STRIDES, outs[::2], outs[1::2], _ANCH):
-            cls = cls.reshape(-1, cls.shape[-1])
-            reg = reg.reshape(-1, 4 * (_REG_MAX + 1))
+        for stride, anc in zip(_STRIDES, _ANCH):
+            cls, reg = by.get(("cls", len(anc))), by.get(("reg", len(anc)))
+            if cls is None or reg is None:
+                continue
             sc = cls[:, PERSON]
             keep = sc >= thr
             if not keep.any():
