@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<BlackmagicDesign>
+    <Plugin>
+        <Id>lk.endora.highlights</Id>
+        <Name>Endora Highlights</Name>
+        <Version>0.1.0</Version>
+        <Description>AI wedding highlights: the best moments of the whole wedding, cut to your song. Powered by Endora.</Description>
+        <FilePath>main.js</FilePath>
+    </Plugin>
+</BlackmagicDesign>

@@ -1,0 +1,6 @@
+{
+  "name": "endora-highlights",
+  "version": "0.1.0",
+  "description": "Endora Highlights for DaVinci Resolve (Workflow Integration plugin)",
+  "main": "main.js"
+}

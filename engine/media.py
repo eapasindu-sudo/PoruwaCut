@@ -107,7 +107,7 @@ _DECODE_MODE: str | None = None  # remembered after the first success: "cuda_sca
 
 
 def iter_frames(path: str, start: float, duration: float, fps: float, width: int = 320,
-                use_gpu: bool = True, gray: bool = False):
+                use_gpu: bool = True, gray: bool = False, skim: bool = False):
     """Yield (time_in_file, frame) sampled at `fps`, scaled to `width` px wide.
 
     Fastest first: NVIDIA decode + resize on the GPU (only the small frame is copied back), then
@@ -139,6 +139,10 @@ def iter_frames(path: str, start: float, duration: float, fps: float, width: int
             # CPU decode (e.g. 10-bit 4:2:2 HEVC the GPU can't decode): skip the deblocking filter,
             # invisible at analysis size and a good deal faster
             c += ["-skip_loop_filter", "all", "-threads", "0"]
+        if skim:
+            # whole-wedding skim (highlights): decode key frames only - many times less work; the fps
+            # filter repeats them on the regular time grid
+            c += ["-skip_frame", "nokey"]
         c += ["-ss", f"{max(0.0, start):.3f}", "-t", f"{duration:.3f}", "-i", path,
               "-an", "-sn", "-dn", "-vf", vf, "-f", "rawvideo", "-pix_fmt", pix, "-"]
         return c

@@ -22,6 +22,8 @@ codesign --force --deep --sign - "$APP"
 codesign --verify --deep --verbose=1 "$APP" || echo "codesign verify warning (ad-hoc)"
 cp dist/PoruwaCut.ccx "$ROOT/Library/Application Support/AutoWed/PoruwaCut.ccx"
 cp build/mac/uninstall.sh "$ROOT/Library/Application Support/AutoWed/uninstall.sh"
+mkdir -p "$ROOT/Library/Application Support/AutoWed/resolve-plugin"
+cp resolve-plugin/* "$ROOT/Library/Application Support/AutoWed/resolve-plugin/"
 cp build/mac/postinstall build/pkgscripts/postinstall
 chmod +x build/pkgscripts/postinstall
 pkgbuild --root "$ROOT" --scripts build/pkgscripts --identifier lk.endora.autowed --version "$VER" \

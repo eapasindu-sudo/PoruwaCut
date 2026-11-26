@@ -58,15 +58,17 @@ def timing_text() -> str:
 CHUNK_LEN = 60.0  # seconds per analysed segment (smaller = smoother live progress)
 
 
-def _cache_path(cache_dir: str, path: str, chunk_start: float, chunk_len: float, fps: float) -> str:
+def _cache_path(cache_dir: str, path: str, chunk_start: float, chunk_len: float, fps: float, skim: bool = False) -> str:
     st = os.stat(path)
     key = f"{VERSION}|{COUPLE['key']}|{os.path.abspath(path)}|{st.st_size}|{int(st.st_mtime)}|{chunk_start}|{chunk_len}|{fps}"
+    if skim:
+        key += "|skim"
     h = hashlib.sha1(key.encode()).hexdigest()[:16]
     base = os.path.splitext(os.path.basename(path))[0]
     return os.path.join(cache_dir, f"{base}_{int(chunk_start):06d}_{h}.npz")
 
 
-def _analyze_chunk(path: str, start: float, length: float, fps: float, use_gpu: bool, tick=None) -> dict:
+def _analyze_chunk(path: str, start: float, length: float, fps: float, use_gpu: bool, tick=None, skim: bool = False) -> dict:
     n = int(round(length * fps))
     out = {m: np.full(n, np.nan, np.float32) for m in METRICS}
     det = FaceDetector(use_gpu)
@@ -87,7 +89,7 @@ def _analyze_chunk(path: str, start: float, length: float, fps: float, use_gpu: 
     t_dec = t_pic = t_face = 0.0
     nfr = 0
     t_mark = time.perf_counter()
-    for t, frame in iter_frames(path, start, length, fps, ANALYSIS_WIDTH, use_gpu):
+    for t, frame in iter_frames(path, start, length, fps, ANALYSIS_WIDTH, use_gpu, skim=skim):
         t_now = time.perf_counter()
         t_dec += t_now - t_mark
         nfr += 1
@@ -236,7 +238,7 @@ _INFLIGHT_LK = _threading.Lock()
 
 
 def analyze_file(path: str, f_start: float, f_end: float, fps: float, cache_dir: str,
-                 chunk_len: float = CHUNK_LEN, use_gpu: bool = True, progress=None, tick=None) -> dict:
+                 chunk_len: float = CHUNK_LEN, use_gpu: bool = True, progress=None, tick=None, skim: bool = False) -> dict:
     """Metrics on grid times j/fps for f_start <= j/fps < f_end (file time)."""
     os.makedirs(cache_dir, exist_ok=True)
     info = probe(path)
@@ -252,7 +254,7 @@ def analyze_file(path: str, f_start: float, f_end: float, fps: float, cache_dir:
         cl = min(chunk_len, info.duration - cs)
         if cl <= 0:
             break
-        cp = _cache_path(cache_dir, path, cs, chunk_len, fps)
+        cp = _cache_path(cache_dir, path, cs, chunk_len, fps, skim)
         d = None
         # another thread (look-ahead) already analysing this chunk: wait for it instead of doing it twice
         while True:
@@ -279,7 +281,7 @@ def analyze_file(path: str, f_start: float, f_end: float, fps: float, cache_dir:
                     pass
         try:
             if d is None:
-                d = _analyze_chunk(path, cs, cl, fps, use_gpu, tick)
+                d = _analyze_chunk(path, cs, cl, fps, use_gpu, tick, skim)
                 tmp = cp + ".part.npz"
                 try:
                     np.savez_compressed(tmp, **d)

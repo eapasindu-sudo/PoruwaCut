@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="si">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; connect-src http://127.0.0.1:7788 http://localhost:7788; style-src 'self' 'unsafe-inline'">
+<title>Endora Highlights</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 13px/1.45 -apple-system, "Segoe UI", "Noto Sans Sinhala", "Iskoola Pota", sans-serif; background: #16171c; color: #e6e6ea; }
+  header { padding: 14px 16px 10px; border-bottom: 1px solid #26272e; display: flex; align-items: center; gap: 10px; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 650; letter-spacing: .2px; }
+  header .by { color: #8a8b93; font-size: 11px; }
+  #st { margin-left: auto; font-size: 11px; color: #8a8b93; }
+  #st.ok { color: #6fd39a; } #st.bad { color: #ff7b72; }
+  main { padding: 12px 16px 24px; }
+  .card { background: #1d1e24; border: 1px solid #2a2b33; border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+  .card h2 { font-size: 11px; letter-spacing: .6px; color: #9a9ba3; margin: 0 0 8px; font-weight: 600; text-transform: uppercase; }
+  button { background: #2a2b33; color: #e6e6ea; border: 1px solid #3a3b44; border-radius: 6px; padding: 7px 12px; font: inherit; cursor: pointer; }
+  button:hover { background: #33343d; }
+  button.pri { background: #7c5cff; border-color: #7c5cff; color: #fff; }
+  button.pri:hover { background: #8b6dff; }
+  button:disabled { opacity: .45; cursor: default; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .mute { color: #8a8b93; font-size: 12px; }
+  #bar { height: 6px; background: #26272e; border-radius: 3px; overflow: hidden; margin: 8px 0 4px; }
+  #bar > div { height: 100%; width: 0; background: #7c5cff; transition: width .4s; }
+  #log { max-height: 120px; overflow: auto; font-size: 11px; color: #9a9ba3; white-space: pre-wrap; margin-top: 6px; }
+  .grp { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
+  .grp .k { font-size: 11px; color: #9a9ba3; }
+  #song { display: flex; height: 26px; border-radius: 4px; overflow: hidden; margin: 6px 0; }
+  #song div { height: 100%; font-size: 10px; display: flex; align-items: center; justify-content: center; color: #fff; overflow: hidden; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+  .chip { background: #24252c; border: 1px solid #33343c; border-radius: 12px; padding: 2px 9px; font-size: 11px; cursor: pointer; }
+  .chip.on { border-color: #b48cff; color: #fff; background: #2d2640; }
+  #list { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+  .m { background: #24252c; border-radius: 6px; overflow: hidden; font-size: 11px; }
+  .m img { width: 100%; aspect-ratio: 16/9; object-fit: cover; display: block; background: #111; }
+  .m .t { padding: 5px 7px; }
+  .m .n { color: #9a9ba3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tag { display: inline-block; background: #33343c; border-radius: 3px; padding: 0 4px; margin: 2px 2px 0 0; font-size: 10px; }
+  .sc { float: right; color: #b48cff; font-weight: 600; }
+  input[type=number] { width: 64px; background: #24252c; color: #e6e6ea; border: 1px solid #3a3b44; border-radius: 5px; padding: 5px; }
+</style>
+</head>
+<body>
+<header><h1>Endora Highlights</h1><span class="by">Powered by Endora</span><span id="st">…</span></header>
+<main>
+  <div class="card">
+    <h2>⚡ Auto</h2>
+    <div class="mute">Project එක කියවලා, analyze කරලා, highlight timeline එකම හදනවා. ඉවර වුණාම බලලා හදන්න.</div>
+    <div class="row" style="margin-top:8px"><button id="auto" class="pri">⚡ Highlight එක auto හදන්න</button></div>
+  </div>
+  <div class="card">
+    <h2>1 · Resolve project එක</h2>
+    <div class="mute">Media pool එකේ wedding එකේ clips ඔක්කොම තියෙන්න ඕන. Highlight timeline එක open කරලා සින්දුව(ල) audio track එකට දාන්න.</div>
+    <div class="row" style="margin-top:8px"><button id="read">Project එක කියවන්න</button><span id="snapInfo" class="mute"></span></div>
+  </div>
+  <div class="card">
+    <h2>2 · AI analysis (offline, GPU)</h2>
+    <div class="row"><button id="go" class="pri" disabled>Analyze කරන්න</button><button id="stop" disabled>Stop</button><span id="stage" class="mute"></span></div>
+    <div id="bar"><div></div></div>
+    <div id="log"></div>
+  </div>
+  <div class="card" id="songCard" style="display:none">
+    <h2>සින්දුව</h2>
+    <div id="songInfo" class="mute"></div>
+    <div id="song"></div>
+    <button id="markSong">කොටස් timeline එකට markers විදිහට</button>
+  </div>
+  <div class="card" id="grpCard" style="display:none">
+    <h2>දවසේ කොටස් (highlight එකට ගන්නේ ✓ ඒවා විතරයි)</h2>
+    <div id="groups"></div>
+  </div>
+  <div class="card" id="buildCard" style="display:none">
+    <h2>3 · Highlight timeline එක</h2>
+    <div class="mute">සින්දුවේ beat එකට cuts · intro → පෝරුව → speech lines → celebration → couple ending. Music එක speech lines වලදී අඩු වෙනවා.</div>
+    <div class="row" style="margin-top:8px">
+      <label><input type="checkbox" id="optSpeech" checked> Speech lines</label>
+      <label><input type="checkbox" id="optSlow" checked> Slow-mo clips slow-mo විදිහට</label>
+    </div>
+    <div class="row" style="margin-top:8px"><button id="build" class="pri">Highlight timeline එක හදන්න</button><span id="buildInfo" class="mute"></span></div>
+  </div>
+  <div class="card">
+    <h2>4 · මගේ style එක ඉගෙනගන්න</h2>
+    <div class="mute">ඔබ ඉවර කරපු highlight timeline එකක් open කරලා ඔබන්න: shot දිග (සින්දුවේ energy අනුව) සහ slow-mo ප්‍රමාණය ඉගෙනගන්නවා. ඊළඟ highlights ඔබේ style එකට.</div>
+    <div class="row" style="margin-top:8px"><button id="learn">මේ timeline එකෙන් ඉගෙනගන්න</button><span id="learnInfo" class="mute"></span></div>
+  </div>
+  <div class="card" id="resCard" style="display:none">
+    <h2>හොඳම moments</h2>
+    <div class="chips" id="chips"></div>
+    <div class="row" style="margin-bottom:10px">
+      <span class="mute">Top</span><input id="topN" type="number" value="60" min="5" max="500">
+      <button id="mark" class="pri">Clips වලට markers දාන්න</button><button id="clear">Markers අයින් කරන්න</button>
+    </div>
+    <div id="list"></div>
+  </div>
+</main>
+<script src="renderer.js"></script>
+</body>
+</html>

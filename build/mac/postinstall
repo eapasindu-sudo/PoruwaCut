@@ -36,4 +36,13 @@ UPIA="/Library/Application Support/Adobe/Adobe Desktop Common/RemoteComponents/U
 if [ -x "$UPIA" ] && [ -f "$CCX" ]; then
   sudo -u "$U" "$UPIA" --install "$CCX" >/tmp/autowed_upia.log 2>&1 || true
 fi
+# DaVinci Resolve (Studio): Endora Highlights panel -> Workspace > Workflow Integrations
+RES="/Library/Application Support/Blackmagic Design/DaVinci Resolve"
+if [ -d "$RES" ]; then
+  DST="$RES/Workflow Integration Plugins/Endora Highlights"
+  mkdir -p "$DST"
+  cp "/Library/Application Support/AutoWed/resolve-plugin/"* "$DST/" 2>/dev/null || true
+  NODE="$RES/Developer/Workflow Integrations/Examples/SamplePlugin/WorkflowIntegration.node"
+  [ -f "$NODE" ] && cp "$NODE" "$DST/" || true
+fi
 exit 0

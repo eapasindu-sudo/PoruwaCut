@@ -30,7 +30,7 @@ CloseApplications=force
 RestartApplications=no
 
 [Messages]
-FinishedLabel=AutoWed installed. Powered by Endora.%n%nOpen Premiere Pro and go to:%nWindow > UXP Plugins > AutoWed%n%n(If Premiere was open, restart it.)
+FinishedLabel=AutoWed installed. Powered by Endora.%n%nPremiere Pro: Window > UXP Plugins > AutoWed%nDaVinci Resolve Studio: Workspace > Workflow Integrations > Endora Highlights%n%n(If Premiere or Resolve was open, restart it.)
 
 [InstallDelete]
 ; remove the previous engine build completely so old libraries never mix with new ones
@@ -48,6 +48,7 @@ Source: "..\dist\PoruwaCut.ccx"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\dist\AutoWedMCP.exe"; DestDir: "{app}\mcp"; Flags: ignoreversion
 Source: "..\dist\AutoWed.mcpb"; DestDir: "{app}\mcp"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\resolve-plugin\*"; DestDir: "{app}\resolve-plugin"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{userprograms}\AutoWed\AutoWed Engine"; Filename: "{app}\engine\PoruwaCutEngine.exe"
@@ -99,8 +100,43 @@ begin
   Result := '';
 end;
 
+{ DaVinci Resolve (Studio): Endora Highlights panel -> Workspace > Workflow Integrations.
+  Copied with code (not [Files]) so a locked / protected folder never stops an AutoWed update. }
+procedure InstallResolvePlugin();
+var
+  Src, Dst, Node: String;
+  Names: array of String;
+  i: Integer;
+begin
+  if not DirExists(ExpandConstant('{commonappdata}\Blackmagic Design\DaVinci Resolve')) then
+  begin
+    Log('DaVinci Resolve not found - Endora Highlights panel not installed');
+    exit;
+  end;
+  Src := ExpandConstant('{app}\resolve-plugin\');
+  Dst := ExpandConstant('{commonappdata}\Blackmagic Design\DaVinci Resolve\Support\Workflow Integration Plugins\Endora Highlights\');
+  if not ForceDirectories(Dst) then
+  begin
+    Log('Cannot create ' + Dst);
+    exit;
+  end;
+  SetArrayLength(Names, 6);
+  Names[0] := 'manifest.xml'; Names[1] := 'package.json'; Names[2] := 'main.js';
+  Names[3] := 'preload.js'; Names[4] := 'index.html'; Names[5] := 'renderer.js';
+  for i := 0 to GetArrayLength(Names) - 1 do
+    if not FileCopy(Src + Names[i], Dst + Names[i], False) then
+      Log('Copy failed: ' + Names[i]);
+  Node := ExpandConstant('{commonappdata}\Blackmagic Design\DaVinci Resolve\Support\Developer\Workflow Integrations\Examples\SamplePlugin\WorkflowIntegration.node');
+  if FileExists(Node) then
+    FileCopy(Node, Dst + 'WorkflowIntegration.node', False)
+  else
+    Log('WorkflowIntegration.node not found (Resolve Studio needed)');
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
+  if CurStep = ssPostInstall then
+    InstallResolvePlugin();
   if (CurStep = ssPostInstall) and (not UpiaExists) and (not WizardSilent) then
     MsgBox('Creative Cloud plugin installer was not found.' + #13#10 +
            'Install the Premiere plugin by double-clicking:' + #13#10 +

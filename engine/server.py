@@ -219,6 +219,76 @@ def __run_events_impl(job, body):
         print(traceback.format_exc(), flush=True)
 
 
+def _hl_out_dir(paths) -> str:
+    """Rendered highlight audio goes next to the footage (.endora_highlights), else the app folder."""
+    try:
+        base = os.path.commonpath([os.path.dirname(os.path.abspath(p_)) for p_ in paths]) if paths else ""
+        if base and os.path.isdir(base) and os.access(base, os.W_OK):
+            return os.path.join(base, ".endora_highlights")
+    except ValueError:
+        pass
+    return os.path.join(DATA_DIR, "highlights")
+
+
+def __run_hl_plan_impl(job, body):
+    import time
+    from . import highlight_build
+    log = _logger(job)
+    t0 = time.time()
+    try:
+        job["status"] = "running"
+
+        def prog(stage, overall, frac):
+            job["stage"], job["progress"], job["stage_progress"] = stage, round(float(overall), 4), round(float(frac), 4)
+        out = _hl_out_dir([c.get("path") for c in (body.get("analysis") or {}).get("clips") or [] if c.get("path")])
+        job["result"] = highlight_build.plan(body, out, log=log, progress=prog)
+        job["progress"] = 1.0
+        job["status"] = "done"
+        log(f"plan ඉවරයි ({time.time() - t0:.0f}s)")
+    except ValueError as e:
+        job["status"] = "error"
+        job["log"].append(f"ERROR: {e}")
+    except Exception as e:  # noqa: BLE001
+        job["status"] = "error"
+        job["log"].append(f"ERROR: {e}")
+        job["log"].append(traceback.format_exc())
+
+
+def __run_highlights_impl(job, body):
+    """Endora Highlights (DaVinci Resolve panel): best moments of the whole wedding + song structure."""
+    import time
+    from . import highlights
+    log = _logger(job)
+    t0 = time.time()
+    try:
+        job["status"] = "running"
+        paths = [c.get("path") for c in body.get("clips") or [] if c.get("path")]
+        cache_dir = os.path.join(DATA_DIR, "cache", "highlights")
+        try:
+            base = os.path.commonpath([os.path.dirname(os.path.abspath(p_)) for p_ in paths]) if paths else ""
+            if base and os.path.isdir(base) and os.access(base, os.W_OK):
+                cache_dir = os.path.join(base, ".poruwacut_cache")
+        except ValueError:      # clips on different drives
+            pass
+
+        def prog(stage, overall, frac):
+            job["stage"], job["progress"], job["stage_progress"] = stage, round(float(overall), 4), round(float(frac), 4)
+            job["elapsed"] = round(time.time() - t0, 1)
+        job["result"] = highlights.analyze(body, cache_dir, use_gpu=not (body.get("options") or {}).get("cpu"),
+                                           progress=prog, log=log)
+        job["progress"] = 1.0
+        job["status"] = "done"
+        log(f"✔ Highlights analysis ඉවරයි ({time.time() - t0:.0f}s)")
+    except Exception as e:  # noqa: BLE001
+        from .media import Cancelled
+        if isinstance(e, Cancelled):
+            raise
+        job["status"] = "error"
+        job["log"].append(f"ERROR: {e}")
+        job["log"].append(traceback.format_exc())
+        print(traceback.format_exc(), flush=True)
+
+
 def _run_edit(job, body):
     return _guarded(job, body, __run_edit_impl)
 
@@ -452,7 +522,7 @@ def api(method: str, path: str, body: dict | None = None):
         if path == "/api/license/remove":
             return 200, license.remove()
         # no licence: nothing that edits, syncs or analyses runs
-        if path in ("/api/edit", "/api/sync", "/api/events", "/api/learn") and not license.is_valid():
+        if path in ("/api/edit", "/api/sync", "/api/events", "/api/learn", "/api/hl/analyze", "/api/hl/plan", "/api/hl/learn") and not license.is_valid():
             st = license.status()
             return 402, {"error": st.get("message") or "License එකක් නැහැ.", "license": st}
         if path == "/api/notify":
@@ -523,6 +593,22 @@ def api(method: str, path: str, body: dict | None = None):
         if path == "/api/sync":
             job = _new_job("sync")
             threading.Thread(target=_run_sync, args=(job, body), daemon=True).start()
+            return 200, {"job": job["id"]}
+        if path == "/api/hl/plan":
+            job = _new_job("highlight-plan")
+            threading.Thread(target=_guarded, args=(job, body, __run_hl_plan_impl), daemon=True).start()
+            return 200, {"job": job["id"]}
+        if path == "/api/hl/learn":
+            from . import highlight_build
+            try:
+                lines = []
+                st = highlight_build.learn(body, log=lines.append)
+                return 200, {"ok": True, "style": st, "log": lines}
+            except ValueError as e:
+                return 400, {"error": str(e)}
+        if path == "/api/hl/analyze":
+            job = _new_job("highlights")
+            threading.Thread(target=_guarded, args=(job, body, __run_highlights_impl), daemon=True).start()
             return 200, {"job": job["id"]}
         if path == "/api/edit":
             job = _new_job("edit")
