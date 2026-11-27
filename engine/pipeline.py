@@ -383,6 +383,7 @@ def run(project: dict, event: str = "auto", out_dir: str = "out", overrides: dic
     log("Audio එක අහමින් (beats, වචන ඉවර වෙන තැන්, music)...")
     audio = sequence_audio(project, t0, t1, beatmod.SR, progress=lambda f: prog("audio", 0.5 * f))
     beats = dbeats = np.zeros(0)
+    songs = []
     beat_period = None
     rolls = []
     music = np.zeros(int(t1 - t0) + 1)
@@ -657,11 +658,23 @@ def run(project: dict, event: str = "auto", out_dir: str = "out", overrides: dic
                 log(f"  පෝරුවේ කොටස් {len(qc['rituals'])} (ගාථා / බෙර / අත්පොළසන් / නිහඬ)")
         except Exception as e:  # noqa: BLE001
             log(f"  පෝරුවේ කොටස් මඟ හැරියා: {e}")
+    hl = None
+    if ex.get("highlight_min"):
+        try:
+            from . import highlight_cut
+            hl = highlight_cut.plan(project, final_segs, analysis, scores, beats, dbeats,
+                                    [{**s_, "start": s_["start"] + t0, "end": s_["end"] + t0} for s_ in songs],
+                                    qc, dead, float(ex["highlight_min"]) * 60.0, preset.grid == "beats", log=log)
+        except Exception as e:  # noqa: BLE001
+            import traceback as _tb
+            log(f"  Highlight cut බැරි වුණා: {e}")
+            print(_tb.format_exc(), flush=True)
     prog("qc", 1.0)
     lens = [s["end"] - s["start"] for s in final_segs]
     result = {
         "event": preset.id, "mode": preset.id, "range": [r0, r1], "fps": fps, "config": preset.to_dict(),
         "segments": final_segs, "dead": dead, "remove_dead": remove_dead, "trim": trim, **qc,
+        "highlight": hl,
         "copy_edit": {k: ex.get(k) for k in ("silence", "flash_frames", "trim", "best_mic", "loudness")},
         "markers": [{"time": d["start"], "name": "CHECK - all cams weak"} for d in dead],
         "stats": {"cuts": max(0, len(final_segs) - 1), "avg_shot": round(float(np.mean(lens)), 2) if lens else 0,

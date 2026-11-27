@@ -92,6 +92,14 @@ def normalise(p: dict) -> dict:
         p["range"] = [min(cl["tl_start"] for cl in mc), max(cl["tl_end"] for cl in mc)]
         p["range"][0] = max(p["range"][0], min(starts))
         p["range"][1] = min(p["range"][1], max(ends))
+    else:
+        # an In/Out far outside the footage (seen: In = -400000 s) must never make a huge audio buffer
+        starts = [cl["tl_start"] for c in p["cameras"] for cl in c["clips"]]
+        ends = [cl["tl_end"] for c in p["cameras"] for cl in c["clips"]]
+        r0, r1 = float(p["range"][0]), float(p["range"][1])
+        p["range"] = [max(r0, min(starts)), min(r1, max(ends))]
+        if p["range"][1] - p["range"][0] < 1.0:
+            raise ValueError("In/Out එක ඇතුළේ clips නැහැ")
     return p
 
 
