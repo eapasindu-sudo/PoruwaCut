@@ -420,9 +420,25 @@ async function itemsOfTrack(track) {
   return out.sort((x, y) => x.a - y.a);
 }
 async function readTI(it) {
-  return { a: (await it.getStartTime()).seconds, b: (await it.getEndTime()).seconds,
-           inp: (await it.getInPoint()).seconds, out: (await it.getOutPoint()).seconds };
+  const A = await it.getStartTime(), B = await it.getEndTime(), I = await it.getInPoint(), O = await it.getOutPoint();
+  return { a: A.seconds, b: B.seconds, inp: I.seconds, out: O.seconds,
+           // exact integer ticks (seconds are floats: at 59.94 a sum of them can land a hair under a frame
+           // and Premiere then snaps it one frame early = video 1 frame out of sync with the audio)
+           ka: tk(A), kb: tk(B), ki: tk(I), ko: tk(O) };
 }
+function tk(t) { try { const n = Number(t.ticks); if (isFinite(n)) return n; } catch (e) {} return Math.round(t.seconds * TICKS); }
+const TPF = {};
+async function ticksPerFrame(seq) {
+  const g = seq.guid.toString();
+  if (!TPF[g]) {
+    let n = 0;
+    try { n = Number(await seq.getTimebase()); } catch (e) {}
+    TPF[g] = n > 0 ? n : Math.round(TICKS / 25);
+  }
+  return TPF[g];
+}
+const snapTk = (ticks, tpf) => Math.round(ticks / tpf) * tpf;
+const ttk = (ticks) => ppro.TickTime.createWithTicks(String(Math.round(ticks)));
 
 // ---------- cutting a track at time t, keeping sync ----------
 // Premiere 27.1+ has a razor action. 26.x does not: there we trim the clip, clone it into the gap
@@ -612,6 +628,9 @@ async function spareAudioIndex(project, seq, g) {
 }
 async function emulatedRazor(project, seq, vIndex, t, whole) {
   const g = seq.guid.toString();
+  const tpf = await ticksPerFrame(seq);
+  const tT = snapTk(Math.round(t * TICKS), tpf);      // the cut sits exactly on a frame
+  t = tT / TICKS;
   const seqNow = async () => (seq = await freshSeq(project, seq, g));
   const track = async () => (await seqNow()).getVideoTrack(vIndex);
   const first = await retryStale(async () => {
@@ -629,7 +648,8 @@ async function emulatedRazor(project, seq, vIndex, t, whole) {
     return false;
   }
   const pi = ppro.ClipProjectItem.cast(raw);
-  const wantIn = o.inp + (t - a);
+  const wantInT = o.ki + (tT - o.ka);                 // exact: the source frame that plays at t now
+  const wantIn = wantInT / TICKS;
   // camera audio stays uncut unless the editor chose linked cuts (Settings > Camera audio)
   const linked = $("x_alink") && $("x_alink").value === "link";
   const own = linked ? await ownAudioAt(project, seq, g, first.name, a, o.inp, t) : null;
@@ -640,27 +660,29 @@ async function emulatedRazor(project, seq, vIndex, t, whole) {
   const overwriteFrom = async (inPt, outPt) => withLabel(project, pi, vIndex, async () => {
     let setIO = false;
     try {
-      transact(project, "AutoWed cut", () => [pi.createSetInOutPointsAction(tt(inPt), tt(outPt))]);
+      transact(project, "AutoWed cut", () => [pi.createSetInOutPointsAction(ttk(inPt), ttk(outPt))]);
       setIO = true;
       await retryStale(async () => {
         const s = await seqNow();
-        transact(project, "AutoWed cut", () => [ppro.SequenceEditor.getEditor(s).createOverwriteItemAction(raw, tt(t), vIndex, at.index)]);
+        transact(project, "AutoWed cut", () => [ppro.SequenceEditor.getEditor(s).createOverwriteItemAction(raw, ttk(tT), vIndex, at.index)]);
       });
     } finally {
       if (setIO) { try { transact(project, "AutoWed cut", () => [pi.createClearInOutPointsAction()]); } catch (e) {} }
     }
   });
   const readNew = () => retryStale(async () => { const it = await findItem(track, t, null); return it ? readTI(it) : null; });
+  // the per-file In/Out offset (whole frames, in ticks) is learned only from a real difference of at
+  // least half a frame - never from float rounding, which used to shift later cuts of the file by 1 frame
   let off = IO_OFFSET[first.name] || 0;
-  await overwriteFrom(wantIn - off, o.out - off);
+  await overwriteFrom(wantInT - off, o.ko - off);
   let done = await readNew();
-  for (let k = 0; k < 2 && done && Math.abs(done.inp - wantIn) > 0.004; k++) {
-    off += done.inp - wantIn;
+  for (let k = 0; k < 2 && done && Math.abs(done.ki - wantInT) >= tpf / 2; k++) {
+    off += done.ki - wantInT;
     IO_OFFSET[first.name] = off;
-    await overwriteFrom(wantIn - off, o.out - off);
+    await overwriteFrom(wantInT - off, o.ko - off);
     done = await readNew();
   }
-  if (!done || Math.abs(done.inp - wantIn) > 0.02) syncWarns.push(fmt(t));
+  if (!done || Math.abs(done.ki - wantInT) >= tpf / 2) syncWarns.push(fmt(t));
   if (whole && first.off) {   // a recolored piece keeps its enable state
     try { await retryStale(async () => { const it = await findItem(track, t, null); if (it) transact(project, "AutoWed cut", () => [it.createSetDisabledAction(true)]); }); } catch (e) {}
   }
@@ -698,7 +720,8 @@ async function razorTracks(project, seq, tracks, t, native) {
   if (native) {
     const editor = ppro.SequenceEditor.getEditor(seq);
     const V = ppro.Constants.MediaType.VIDEO;
-    transact(project, "AutoWed cut", () => tracks.map((ti) => editor.createRazorTrackAction(V, ti, tt(t), false, V)));
+    const at = snapTk(Math.round(t * TICKS), await ticksPerFrame(seq));
+    transact(project, "AutoWed cut", () => tracks.map((ti) => editor.createRazorTrackAction(V, ti, ttk(at), false, V)));
     return;
   }
   const g = seq.guid.toString();
@@ -809,6 +832,9 @@ async function cutAudioAt(project, seq, aIndex, t) {
   // like emulatedRazor, for an audio clip: overwrite its own media from t on the same audio track;
   // a camera file's video that comes along goes to a spare video track and is removed
   const g = seq.guid.toString();
+  const tpf = await ticksPerFrame(seq);
+  const tT = snapTk(Math.round(t * TICKS), tpf);
+  t = tT / TICKS;
   const seqNow = async () => (seq = await freshSeq(project, seq, g));
   const track = async () => (await seqNow()).getAudioTrack(aIndex);
   const first = await retryStale(async () => {
@@ -822,17 +848,17 @@ async function cutAudioAt(project, seq, aIndex, t) {
   const { a, o, raw } = first;
   if (o.out > o.inp && Math.abs((o.out - o.inp) / (first.b - a) - 1) > 0.01) return false;
   const pi = ppro.ClipProjectItem.cast(raw);
-  const wantIn = o.inp + (t - a);
+  const wantInT = o.ki + (tT - o.ka);
   if (SPARE_VIDEO[g] == null) SPARE_VIDEO[g] = await (await seqNow()).getVideoTrackCount();
   const spareV = SPARE_VIDEO[g];
   const over = async (inPt, outPt) => {
     let setIO = false;
     try {
-      transact(project, "AutoWed cut", () => [pi.createSetInOutPointsAction(tt(inPt), tt(outPt))]);
+      transact(project, "AutoWed cut", () => [pi.createSetInOutPointsAction(ttk(inPt), ttk(outPt))]);
       setIO = true;
       await retryStale(async () => {
         const s = await seqNow();
-        transact(project, "AutoWed cut", () => [ppro.SequenceEditor.getEditor(s).createOverwriteItemAction(raw, tt(t), spareV, aIndex)]);
+        transact(project, "AutoWed cut", () => [ppro.SequenceEditor.getEditor(s).createOverwriteItemAction(raw, ttk(tT), spareV, aIndex)]);
       });
     } finally {
       if (setIO) { try { transact(project, "AutoWed cut", () => [pi.createClearInOutPointsAction()]); } catch (e) {} }
@@ -840,14 +866,14 @@ async function cutAudioAt(project, seq, aIndex, t) {
   };
   const readNew = () => retryStale(async () => { const it = await findItem(track, t, null); return it ? readTI(it) : null; });
   let off = IO_OFFSET["a|" + first.name] || 0;
-  await over(wantIn - off, o.out - off);
+  await over(wantInT - off, o.ko - off);
   let done = await readNew();
-  for (let k = 0; k < 2 && done && Math.abs(done.inp - wantIn) > 0.004; k++) {
-    off += done.inp - wantIn; IO_OFFSET["a|" + first.name] = off;
-    await over(wantIn - off, o.out - off);
+  for (let k = 0; k < 2 && done && Math.abs(done.ki - wantInT) >= tpf / 2; k++) {
+    off += done.ki - wantInT; IO_OFFSET["a|" + first.name] = off;
+    await over(wantInT - off, o.ko - off);
     done = await readNew();
   }
-  if (!done || Math.abs(done.inp - wantIn) > 0.02) syncWarns.push(fmt(t));
+  if (!done || Math.abs(done.ki - wantInT) >= tpf / 2) syncWarns.push(fmt(t));
   if (first.off) {
     try { await retryStale(async () => { const it = await findItem(track, t, null); if (it) transact(project, "AutoWed cut", () => [it.createSetDisabledAction(true)]); }); } catch (e) {}
   }

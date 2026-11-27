@@ -119,8 +119,8 @@ def _mine(ci: dict, times: np.ndarray, fs: dict, audio: np.ndarray | None, max_n
     n = len(score)
     if n < 3:
         return []
-    k = max(3, int(round(2.5 * SKIM_FPS)))                       # 2.5 s windows
-    sm = np.convolve(score, np.ones(k) / k, mode="same")
+    k = min(n, max(3, int(round(2.5 * SKIM_FPS))))               # 2.5 s windows (short clips: the clip)
+    sm = np.convolve(score, np.ones(k) / k, mode="same")[:n]     # "same" is max(n, k) long
     used = np.zeros(n, bool)
     out = []
     for _ in range(max_n):
@@ -254,7 +254,7 @@ def song_structure(music: list[dict], log=print) -> dict | None:
         o.append(float(np.mean(env[int(a / hop):max(int(a / hop) + 1, int(z / hop))])) if len(env) else 0)
     e, o = np.array(e), np.array(o)
     feat = (e - e.mean()) / (e.std() + 1e-6) + 0.5 * (o - o.mean()) / (o.std() + 1e-6)
-    sm = np.convolve(feat, np.ones(3) / 3, mode="same")
+    sm = np.convolve(feat, np.ones(3) / 3, mode="same")[:len(feat)] if len(feat) >= 3 else feat.copy()
     # sections: cut where the smoothed energy jumps, on 4-bar phrases, at least 4 bars long
     cuts = [0]
     for i in range(4, len(sm) - 3):
@@ -311,8 +311,14 @@ def analyze(body: dict, cache_dir: str, use_gpu: bool = True, progress=None, log
             return c["id"], (classify(x, 16000) if len(x) > 16000 * 2 else np.zeros(0, int))
         except Exception:  # noqa: BLE001
             return c["id"], np.zeros(0, int)
+    if progress:
+        progress("sound", 0.01, 0.0)
+    sounds = {}
     with ThreadPoolExecutor(max_workers=4) as ex:
-        sounds = dict(ex.map(sound, clips))
+        for i, (k_, v_) in enumerate(ex.map(sound, clips)):
+            sounds[k_] = v_
+            if progress and i % 5 == 0:
+                progress("sound", 0.05 * (i + 1) / len(clips), (i + 1) / len(clips))
     if progress:
         progress("analyze", 0.05, 0.0)
 
@@ -329,11 +335,17 @@ def analyze(body: dict, cache_dir: str, use_gpu: bool = True, progress=None, log
     skip = {cid for g in groups if g["id"] in excl for cid in g["clips"]}
     fsc = _frame_scores(an)
     moments = []
+    bad = 0
     for c, a, fs in zip(clips, an, fsc):
         if c["id"] in skip:
             continue
         per = max(1, min(12, int(c["dur"] / 20) + 1))
-        moments += _mine(c, np.asarray(a["times"]), fs, sounds.get(c["id"]), per)
+        try:   # one odd clip must never stop the whole wedding
+            moments += _mine(c, np.asarray(a["times"]), fs, sounds.get(c["id"]), per)
+        except Exception as e:  # noqa: BLE001
+            bad += 1
+            if bad <= 3:
+                log(f"  {c['name']} මඟ හැරියා: {e}")
     gid = {cid: g["id"] for g in groups for cid in g["clips"]}
     for m in moments:
         m["group"] = gid.get(m["clip"])
