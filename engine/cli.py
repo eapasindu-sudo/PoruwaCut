@@ -100,7 +100,30 @@ def main(argv=None):
     sv = sub.add_parser("serve", help="Premiere panel / browser UI සඳහා engine server එක")
     sv.add_argument("--port", type=int, default=7788)
 
+    st = sub.add_parser("selftest", help="build check: sync + analyse + edit, nothing is written")
+    st.add_argument("--cams", nargs="+", required=True)
+    st.add_argument("--master", type=int, default=1)
+
     a = ap.parse_args(argv)
+    if a.cmd in ("sync", "edit", "auto"):
+        # the command line makes edits too: same licence as the panel
+        from . import license
+        if not license.is_valid():
+            print(license.status().get("message") or "License එකක් නැහැ.", file=sys.stderr)
+            return 2
+    if a.cmd == "selftest":
+        # used by the release build on a clean machine: proves sync, analysis and the edit work, but
+        # writes no edit (no XML, no project) - so it is no way around the licence
+        import tempfile
+        from . import pipeline
+        p = proj.from_folders(a.cams, a.master - 1, "selftest", log)
+        tmp = tempfile.mkdtemp(prefix="awtest")
+        r = pipeline.run(p, "auto", out_dir=tmp, cache_dir=tmp, write_xml=False, use_gpu=False, log=log)
+        n = len(r.get("segments") or [])
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+        print(f"SELFTEST OK cuts {max(0, n - 1)}")
+        return 0 if n >= 2 else 1
     if a.cmd == "serve":
         from .server import serve
         serve(port=a.port)
