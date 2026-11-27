@@ -1556,7 +1556,9 @@ async function buildHighlight(project, sd, cams, result, evName) {
   try { await project.openSequence(await NS()); } catch (e) {}
   log(`Highlight cut: "${name}" හදනවා · කොටස් ${H.chunks.length} · shots ${H.shots.length} · හිස් තැන් වසන shots ${H.cutaways.length}`, "ok");
 
-  const VSCR = C + 1, ASCR = 2;      // scratch layers: the other half of each overwrite lands here, removed at the end
+  // layers: V1..Vn cameras, V(n+1) cover shots, V(n+2) scratch (the picture half of the sound pieces,
+  // removed); A1/A2 the chosen sound, A3.. every camera's own sound (kept, disabled - nothing deleted)
+  const VSCR = C + 1, ACAM = (ci) => 2 + ci;
   const checked = {};
   const place = async (src, aF, bF, newF, vIdx, aIdx) => {
     const off = IO_OFFSET[src.name] || 0;
@@ -1589,6 +1591,19 @@ async function buildHighlight(project, sd, cams, result, evName) {
     }
   };
   // frame plan: piece k plays at N[k] .. N[k] + len[k] in the new timeline
+  // every layer made up front, in order: an overwrite to a layer that is not there yet lands on the next
+  // new one (seen: V5 asked, V4 used); 1-frame pieces far after the end, removed again
+  {
+    const far = F(36000);
+    const f0 = Math.round(first.o.ka / tpf);
+    for (let i = 0; i <= C + 2; i++) {
+      try { await place(first, f0, f0 + 1, far + 2 * i, i, i); } catch (e) {}
+    }
+    const vn = await (await NS()).getVideoTrackCount(), an = await (await NS()).getAudioTrackCount();
+    for (let i = 0; i < vn; i++) await clearTrack(false, i);
+    for (let i = 0; i < an; i++) await clearTrack(true, i);
+    for (const k of Object.keys(checked)) delete checked[k];
+  }
   let cum = 0;
   const cs = H.chunks.map((c) => { const a = F(c.a), b = F(c.b); const x = { ...c, fa: a, fb: b, n0: cum, hi: F(c.h_in || 0), ho: F(c.h_out || 0) }; cum += b - a; return x; });
   const total = H.chunks.length + H.shots.length + H.cutaways.length;
@@ -1620,7 +1635,7 @@ async function buildHighlight(project, sd, cams, result, evName) {
       const mid = (aF + bF) / 2 * tpf / TICKS;
       const src = await vItem(ci, mid);
       if (!src || src.o.a > aF * tpf / TICKS + 0.02 || src.o.b < bF * tpf / TICKS - 0.02) continue;
-      try { await place(src, aF, bF, n0, ci, ASCR); }
+      try { await place(src, aF, bF, n0, ci, ACAM(ci)); }
       catch (e) { if (ci === s.cam) { fails++; log(`Highlight shot ${fmt(n0 * tpf / TICKS)}: ${e && e.message || e}`, "warn"); } }
     }
     tick();
@@ -1633,10 +1648,26 @@ async function buildHighlight(project, sd, cams, result, evName) {
     if (bF - aF < 1) { tick(); continue; }
     const sF = F(h.src);
     const src = await vItem(h.cam, (sF + (bF - aF) / 2) * tpf / TICKS);
-    if (src) { try { await place(src, sF, sF + (bF - aF), c.n0 + (aF - c.fa), C, ASCR); } catch (e) { fails++; } }
+    if (src) { try { await place(src, sF, sF + (bF - aF), c.n0 + (aF - c.fa), C, ACAM(C)); } catch (e) { fails++; } }
     tick();
   }
-  { const n = await (await NS()).getAudioTrackCount(); for (let i = n - 1; i >= 2; i--) await clearTrack(true, i); }
+  // the cameras' own sound stays (A3..), disabled: one clip per transaction, each looked up fresh
+  {
+    const offA = [];
+    const an = await (await NS()).getAudioTrackCount();
+    for (let i = 2; i < an; i++) {
+      for (const it of (await (await NS()).getAudioTrack(i)).getTrackItems(ppro.Constants.TrackItemType.CLIP, false)) offA.push([i, tk(await it.getStartTime())]);
+    }
+    for (let i = 0; i < offA.length; i++) {
+      try {
+        await retryStale(async () => {
+          const it = await itemStartingAt(await (await NS()).getAudioTrack(offA[i][0]), offA[i][1], tpf);
+          if (it && !(await it.isDisabled())) transact(project, "AutoWed highlight", () => [it.createSetDisabledAction(true)]);
+        });
+      } catch (e) {}
+      if (i % 10 === 0) { showProgress("finish", 0.98, null); await breathe(); }
+    }
+  }
   // 5) only the chosen camera enabled
   showProgress("finish", 0.99, null);
   const chosenAt = (f) => { for (const x of sel) if (f >= x[0] && f < x[1]) return x[2]; return -1; };

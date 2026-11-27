@@ -58,7 +58,10 @@ def _loudness(clip, a, b):
 
 def plan(project: dict, segments: list, analysis: dict, scores: np.ndarray, beats: np.ndarray,
          dbeats: np.ndarray, songs: list, qc: dict, dead: list, target_sec: float, music_only: bool,
-         log=print) -> dict:
+         log=print, style: str = "beats", phrases=None, speech=None, music_act=None) -> dict:
+    """style: "beats" (dance / songs: cut on downbeats, music only), "phrases" (poruwa, speeches,
+    rituals: cut where a sentence / chant ends, the whole event told in order), "auto" (welcomes,
+    cake, table visits: downbeats where music plays, sentence ends elsewhere)."""
     r0, r1 = project["range"]
     t0 = float(r0)
     T = int(math.ceil(r1 - r0)) + 1
@@ -91,11 +94,58 @@ def plan(project: dict, segments: list, analysis: dict, scores: np.ndarray, beat
     music = np.ones(T, np.float32)
     if music_only and songs:
         music = _per_sec(T, t0, [s for s in songs if s.get("bpm", 0) > 0])
-    grid = np.asarray(dbeats if len(dbeats) >= 8 else beats, np.float64)
+    # where people talk (AI voice), per second: a piece never starts or ends inside a sentence
+    talk = np.zeros(T, np.float32)
+    gaps = []
+    if speech is not None:
+        try:
+            s0, step, vp = speech
+            vp = np.asarray(vp, np.float64)
+            tt_ = s0 + np.arange(len(vp)) * step
+            idx = np.clip(np.floor(tt_ - t0).astype(int), 0, T - 1)
+            np.maximum.at(talk, idx, (vp > 0.6).astype(np.float32))
+            quiet = vp < 0.3
+            i = 0
+            while i < len(quiet):          # pauses of >= 0.4 s: their middle is a clean place to cut
+                if quiet[i]:
+                    j = i
+                    while j + 1 < len(quiet) and quiet[j + 1]:
+                        j += 1
+                    if (j - i + 1) * step >= 0.4:
+                        gaps.append(s0 + (i + j + 1) / 2 * step)
+                    i = j + 1
+                else:
+                    i += 1
+        except Exception:  # noqa: BLE001
+            pass
+    mus = None
+    if music_act is not None:
+        m0, m_ = music_act if isinstance(music_act, tuple) else (t0, music_act)
+        m_ = np.asarray(m_, np.float32)
+        if len(m_):
+            mus = np.zeros(T, np.float32)
+            o = int(round(m0 - t0))
+            for i in range(len(m_)):
+                if 0 <= i + o < T:
+                    mus[i + o] = m_[i]
+    db_ = np.asarray(dbeats if len(dbeats) >= 8 else beats, np.float64)
+    ph_ = np.concatenate([np.asarray(phrases if phrases is not None else [], np.float64), np.asarray(gaps, np.float64)])
+    if style == "beats":
+        grid = db_
+    elif style == "phrases":
+        grid = ph_
+    else:
+        on_music = np.array([mus is not None and 0 <= int(t - t0) < T and mus[int(t - t0)] > 0.55 for t in db_], bool) \
+            if len(db_) else np.zeros(0, bool)
+        off_music = np.array([not (mus is not None and 0 <= int(t - t0) < T and mus[int(t - t0)] > 0.55) for t in ph_], bool) \
+            if len(ph_) else np.zeros(0, bool)
+        grid = np.concatenate([db_[on_music], ph_[off_music]])
     if len(grid) < 4:
         grid = np.asarray([s["start"] for s in segs] + [s["end"] for s in segs], np.float64)
     grid = np.unique(grid)
     bp = float(np.median(np.diff(beats))) if len(beats) > 2 else 0.5
+    calm = style != "beats"
+    rit = [float(r["start"]) for r in (qc.get("rituals") or [])]
 
     def snap(t, lo, hi):
         g = grid[(grid >= lo) & (grid <= hi)]
@@ -110,7 +160,7 @@ def plan(project: dict, segments: list, analysis: dict, scores: np.ndarray, beat
     for ti, trk in enumerate(atracks):
         for cl in trk:
             a0, b0 = max(r0, cl["tl_start"] + 0.3), min(r1, cl["tl_end"] - 0.3)
-            for L in (20.0, 30.0, 45.0, 60.0):
+            for L in ((15.0, 25.0, 40.0, 60.0, 90.0) if calm else (20.0, 30.0, 45.0, 60.0)):
                 t = a0
                 while t + L <= b0 + 0.01:
                     a, b = snap(t, a0, b0), snap(t + L, a0, b0)
@@ -128,24 +178,36 @@ def plan(project: dict, segments: list, analysis: dict, scores: np.ndarray, beat
                     cf = float(clip[ti][ia:ib].mean()) if ti in clip else 0.0
                     if df > 0.65 or cf > 0.3 or mf < 0.8:
                         continue
+                    # never in the middle of a sentence
+                    if calm and (talk[min(T - 1, max(0, ia))] > 0 and talk[min(T - 1, max(0, ia - 1))] > 0
+                                 or talk[min(T - 1, max(0, ib))] > 0 and talk[min(T - 1, max(0, ib - 1))] > 0):
+                        continue
                     sc_ = seg_cam[ia:ib]
                     cr = float(np.mean([crew[c][ia + k] if 0 <= c < C else 0 for k, c in enumerate(sc_)]))
-                    score = (float(np.nanmean(qq)) + 1.0 * float((mic[ia:ib] == ti).mean()) - 4.0 * cf
-                             + 0.3 * float(mom[ia:ib].sum()) - 2.0 * df - 1.5 * cr)
+                    score = (float(np.nanmean(qq)) + (1.5 if calm else 1.0) * float((mic[ia:ib] == ti).mean())
+                             - 4.0 * cf + (0.6 if calm else 0.3) * float(mom[ia:ib].sum()) - 2.0 * df - 1.5 * cr
+                             + (1.0 * sum(a <= x < b for x in rit) if calm else 0.0))
                     cands.append({"a": a, "b": b, "atrack": ti, "score": score, "len": b - a})
     cands.sort(key=lambda c: -c["score"])
     chosen, total, block = [], 0.0, {}
-    for c in cands:
-        if total >= target_sec - 8:
-            break
-        if any(c["a"] < x["b"] + 0.5 and c["b"] > x["a"] - 0.5 for x in chosen):
-            continue
-        k = int((c["a"] - t0) // 240)
-        if block.get(k, 0) >= 8 or total + c["len"] > target_sec + 12:
-            continue
-        chosen.append(c)
-        block[k] = block.get(k, 0) + 1
-        total += c["len"]
+    # the whole event, in order: a few pieces from every part (ceremonies tell a story; dance spreads)
+    if calm:
+        parts = max(3, int(round(target_sec / 35.0)))
+        blk, per = max(60.0, (r1 - r0) / parts), 2
+    else:
+        blk, per = 240.0, 8
+    for relaxed in (False, True):
+        for c in cands:
+            if total >= target_sec - 8:
+                break
+            if any(c["a"] < x["b"] + 0.5 and c["b"] > x["a"] - 0.5 for x in chosen):
+                continue
+            k = int((c["a"] - t0) // blk)
+            if (not relaxed and block.get(k, 0) >= per) or total + c["len"] > target_sec + 12:
+                continue
+            chosen.append(c)
+            block[k] = block.get(k, 0) + 1
+            total += c["len"]
     chosen.sort(key=lambda c: c["a"])
 
     def in_clip(ti, a, b):
@@ -242,7 +304,7 @@ def plan(project: dict, segments: list, analysis: dict, scores: np.ndarray, beat
         c["h_in"] = c["h_out"] = 0.0
     for k in range(len(chunks) - 1):
         A, B = chunks[k], chunks[k + 1]
-        xf = min(1.2, max(0.5, 2 * bp))
+        xf = min(1.2, max(0.5, 2 * bp)) if not calm else 1.0
         h = xf / 2
         ca, cb = in_clip(A["atrack"], A["a"], A["b"]), in_clip(B["atrack"], B["a"], B["b"])
         roomA = (ca["tl_end"] - A["b"]) if ca else 0
@@ -264,6 +326,7 @@ def plan(project: dict, segments: list, analysis: dict, scores: np.ndarray, beat
         c["a"], c["b"] = round(c["a"], 4), round(c["b"], 4)
     total = float(sum(c["b"] - c["a"] for c in chunks))
     log(f"  Highlight cut: කොටස් {len(chunks)} · {total / 60:.1f} min · shots {len(shots)} · "
-        f"හිස් තැන් වසන්න shots {len(cutaways)} · crossfade ~{min(1.2, max(0.5, 2 * bp)):.2f}s")
+        f"හිස් තැන් වසන්න shots {len(cutaways)} · "
+        + (f"crossfade ~{min(1.2, max(0.5, 2 * bp)):.2f}s (beats)" if not calm else "crossfade 1.0s (වාක්‍ය / කොටස් ඉවර වෙන තැන්)"))
     return {"target": target_sec, "chunks": chunks, "shots": shots, "cutaways": cutaways,
             "total": round(total, 2), "beat": round(bp, 4), "fade_in": 1.0, "fade_out": 2.5}

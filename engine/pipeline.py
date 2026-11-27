@@ -664,7 +664,10 @@ def run(project: dict, event: str = "auto", out_dir: str = "out", overrides: dic
             from . import highlight_cut
             hl = highlight_cut.plan(project, final_segs, analysis, scores, beats, dbeats,
                                     [{**s_, "start": s_["start"] + t0, "end": s_["end"] + t0} for s_ in songs],
-                                    qc, dead, float(ex["highlight_min"]) * 60.0, preset.grid == "beats", log=log)
+                                    qc, dead, float(ex["highlight_min"]) * 60.0, preset.grid == "beats", log=log,
+                                    style=preset.grid if preset.grid in ("beats", "phrases") else "auto",
+                                    phrases=ph[0] if len(ph[0]) else None, speech=speech,
+                                    music_act=(t0, music) if preset.grid == "auto" else None)
         except Exception as e:  # noqa: BLE001
             import traceback as _tb
             log(f"  Highlight cut බැරි වුණා: {e}")
