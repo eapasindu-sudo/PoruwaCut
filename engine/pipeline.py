@@ -156,6 +156,88 @@ def _thumbs(project, segs, result, limit: int = 48):
         return {k: v for k, v in ex.map(one, want) if v}
 
 
+def _color_balance(analysis, segs, project, ref: int, win: float = 40.0):
+    """Exposure + white balance for every piece, measured from the cameras at the same moments.
+
+    For each piece, the frames around it (±win/2) of this camera and of the others are compared:
+    skin tones of the biggest face when both see faces (exposure + white balance), else the picture
+    centre (white balance fully, exposure only half and limited: different framing). Two targets:
+      rgb      - match the main camera
+      rgb_avg  - meet in the middle of the cameras (each camera moves half the way)
+    Gains are smoothed along the camera's pieces so the picture never flickers from cut to cut."""
+    times = np.asarray(analysis["times"], np.float64)
+    cams = analysis["cams"]
+    C = len(cams)
+    if C < 2 or not len(times):
+        return []
+    luma = np.array([0.299, 0.587, 0.114])
+
+    def stat(c, sel, src):
+        a = cams[c]
+        if src + "_r" not in a:
+            return None, 0
+        r, g, b = (np.asarray(a[src + k], np.float64)[sel] for k in ("_r", "_g", "_b"))
+        ok = np.isfinite(r) & np.isfinite(g) & np.isfinite(b)
+        if "clip_hi" in a:
+            ok &= ~(np.nan_to_num(np.asarray(a["clip_hi"], np.float64)[sel], nan=1.0) > 0.08)
+        n = int(ok.sum())
+        if not n:
+            return None, 0
+        return np.array([np.median(r[ok]), np.median(g[ok]), np.median(b[ok])]), n
+
+    def gains(m, target, src):
+        if m is None or target is None or m.min() < 6:
+            return None
+        if src == "skin":
+            g = target / m                                    # exposure + white balance
+            g = 1.0 + 0.85 * (g - 1.0)
+        else:
+            wb = (target / target.dot(luma)) / (m / m.dot(luma))   # white balance at equal brightness
+            ex = float(np.clip(target.dot(luma) / m.dot(luma), 0.84, 1.19))  # brightness: half, ±0.25 stop
+            g = wb * (1.0 + 0.5 * (ex - 1.0))
+        return np.clip(g, 0.72, 1.38)
+
+    out = []
+    for sg in segs:
+        c = sg["cam"]
+        if c is None or c < 0:
+            continue
+        mid = (sg["start"] + sg["end"]) / 2
+        sel = (times >= mid - win / 2) & (times <= mid + win / 2)
+        if sel.sum() < 6:
+            continue
+        res = {}
+        for src, need in (("skin", 4), ("img", 8)):
+            st = [stat(k, sel, src) for k in range(C)]
+            have = [k for k in range(C) if st[k][0] is not None and st[k][1] >= need]
+            if c not in have or len(have) < 2:
+                continue
+            tgt_main = st[ref][0] if ref in have else None
+            tgt_avg = np.mean([st[k][0] for k in have], axis=0)
+            gm = gains(st[c][0], tgt_main, src) if c != ref else np.ones(3)
+            ga = gains(st[c][0], tgt_avg, src)
+            if ga is None:
+                continue
+            res = {"main": gm if gm is not None else np.ones(3), "avg": ga, "src": src}
+            break
+        if res:
+            out.append({"start": sg["start"], "end": sg["end"], "cam": c, "main": res["main"], "avg": res["avg"], "src": res["src"]})
+    # smooth along each camera: median of the neighbouring pieces (no flicker between cuts)
+    for c in range(C):
+        idx = [i for i, p in enumerate(out) if p["cam"] == c]
+        for key in ("main", "avg"):
+            arr = np.array([out[i][key] for i in idx]) if idx else np.zeros((0, 3))
+            for j, i in enumerate(idx):
+                lo, hi = max(0, j - 2), min(len(idx), j + 3)
+                out[i][key + "_s"] = np.median(arr[lo:hi], axis=0)
+    pieces = []
+    for p in out:
+        pieces.append({"start": round(p["start"], 3), "end": round(p["end"], 3), "cam": p["cam"], "src": p["src"],
+                       "rgb": [round(float(v) * 100, 1) for v in p["main_s"]],
+                       "rgb_avg": [round(float(v) * 100, 1) for v in p["avg_s"]]})
+    return pieces
+
+
 def _rituals(mix16, t0):
     """Poruwa: the parts of the ceremony from its sound (chanting, drums, applause, quiet moments)."""
     from .events_detect import KINDS, classify
@@ -552,6 +634,13 @@ def run(project: dict, event: str = "auto", out_dir: str = "out", overrides: dic
     try:
         cm = _color_match(analysis, final_segs, project)
         if cm is not None:
+            try:
+                cm["pieces"] = _color_balance(analysis, final_segs, project, cm["ref"])
+                if cm["pieces"]:
+                    sk = sum(p_["src"] == "skin" for p_ in cm["pieces"])
+                    log(f"  Exposure + WB balance: කෑලි {len(cm['pieces'])} (skin tones {sk}, scene {len(cm['pieces']) - sk})")
+            except Exception as e:  # noqa: BLE001
+                log(f"  exposure balance මඟ හැරියා: {e}")
             qc["color"] = cm
             if cm["cams"]:
                 for x in cm["cams"]:

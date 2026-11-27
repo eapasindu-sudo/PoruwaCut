@@ -1472,6 +1472,7 @@ function shiftResult(r, d) {
   for (const k of ["segments", "dead", "bad", "clipping", "mic_gaps", "silences", "rituals"]) for (const o of x[k] || []) sh(o, ["start", "end"]);
   for (const k of ["moments", "markers", "jumps"]) for (const o of x[k] || []) sh(o, ["time"]);
   for (const o of x.mic_choice || []) sh(o, ["start", "end"]);
+  if (x.color && x.color.pieces) for (const o of x.color.pieces) sh(o, ["start", "end"]);
   x.shifted = true;
   return x;
 }
@@ -2069,6 +2070,34 @@ async function colorEffectName() {
   } catch (e) {}
   return COLOR_MATCH_NAME;
 }
+// Lumetri Color (measured on Premiere 26.5 with exported frames): Temperature t multiplies R/B by
+// exp(0.0115 t); Tint +t lowers G against R,B by exp(-0.0059 t) (magenta), -t raises it by exp(0.0086 t);
+// Exposure +1 = x1.41 brighter (8-bit picture), -1 = x0.59.
+function gainToLumetri(g) {
+  const k = (0.299 * g[0] + 0.587 * g[1] + 0.114 * g[2]) / 100;           // brightness change wanted
+  const ex = k >= 1 ? Math.log2(k) / 0.5 : Math.log2(k) / 0.76;
+  const r = g[0] / k, gg = g[1] / k, b = g[2] / k;
+  const temp = Math.log(r / b) / 0.0115;
+  const rg = gg / ((r + b) / 2);
+  const tint = rg < 1 ? -Math.log(rg) / 0.0059 : -Math.log(rg) / 0.0086;
+  const cl = (v, m) => Math.max(-m, Math.min(m, v));
+  return { exposure: +cl(ex, 1.5).toFixed(3), temperature: +cl(temp, 60).toFixed(2), tint: +cl(tint, 40).toFixed(2) };
+}
+function lumetriParams(comp) {
+  const n = comp.getParamCount();
+  const ps = {};
+  for (let i = 0; i < n; i++) {
+    const q = comp.getParam(i);
+    const d = String(q.displayName || "").trim().toLowerCase();
+    if (!ps.temperature && d === "temperature") ps.temperature = q;
+    else if (!ps.tint && d === "tint") ps.tint = q;
+    else if (!ps.exposure && d === "exposure") ps.exposure = q;
+  }
+  if (!(ps.temperature && ps.tint && ps.exposure) && n > 19) {   // names missing: Basic Correction indexes
+    ps.temperature = comp.getParam(14); ps.tint = comp.getParam(15); ps.exposure = comp.getParam(19);
+  }
+  return ps.temperature && ps.tint && ps.exposure ? ps : null;
+}
 function rgbParams(comp) {
   const n = comp.getParamCount();
   const ps = {};
@@ -2086,15 +2115,36 @@ async function paramNumber(p) {
   catch (e) { return null; }
 }
 async function colorMatch(project, sd, cams, result) {
-  const mode = ($("x_color") || {}).value || "on";
+  // x_color: "on" / "avg" = Lumetri (main camera / both cameras meet in the middle),
+  //          "rgb" / "rgbavg" = Color Balance (RGB), "off"
+  const sel = ($("x_color") || {}).value || "on";
+  const lumetri = sel === "on" || sel === "avg";
+  const mode = sel === "avg" || sel === "rgbavg" ? "avg" : (sel === "off" ? "off" : "main");
   const cm = result.color;
-  if (mode === "off" || !cm || !cm.cams || !cm.cams.length) return;
-  const match = await colorEffectName();
+  if (mode === "off" || !cm) return;
+  const pieces = (cm.pieces || []).map((p) => ({ ...p, g: mode === "avg" ? p.rgb_avg : p.rgb }));
+  // per-camera fallback (older engine / no data around a piece): the whole-event gains
+  const camGain = {};
+  for (const x of cm.cams || []) camGain[x.cam] = x.rgb;
+  if (!pieces.length && !Object.keys(camGain).length) return;
+  const match = lumetri ? "AE.ADBE Lumetri" : await colorEffectName();
   if (!match) { log("Color match: 'Color Balance (RGB)' effect එක මේ Premiere එකේ හම්බුණේ නැහැ. Gains log එකේ තියෙනවා, අතින් දාන්න පුළුවන්.", "warn"); return; }
   const [r0, r1] = result.range;
-  let done = 0, failed = 0, checked = false;
-  for (const x of cm.cams) {
-    const c = cams[x.cam];
+  const near = (g) => !g || g.every((v) => Math.abs(v - 100) < 1.5);
+  const gainAt = (cam, a, b) => {
+    const m = (a + b) / 2;
+    let best = null, bd = 1e9;
+    for (const p of pieces) {
+      if (p.cam !== cam) continue;
+      const d = m >= p.start - 0.05 && m <= p.end + 0.05 ? 0 : Math.min(Math.abs(m - p.start), Math.abs(m - p.end));
+      if (d < bd) { bd = d; best = p; }
+    }
+    if (best && bd < 2.0) return best.g;
+    return mode === "avg" ? null : camGain[cam];
+  };
+  let done = 0, failed = 0, checked = false, skipped = 0;
+  for (let ci = 0; ci < cams.length; ci++) {
+    const c = cams[ci];
     if (!c) continue;
     let items = [];
     try {
@@ -2104,8 +2154,11 @@ async function colorMatch(project, sd, cams, result) {
       for (const o of items) { try { if (!(await o.it.isDisabled())) en.push(o); } catch (e) { en.push(o); } }
       items = en;
     } catch (e) { log("Color match: " + (e && e.message || e), "warn"); continue; }
+    let n = 0;
     for (const o of items) {
       if (STOPPING) return;
+      const g = gainAt(ci, o.a, o.b);
+      if (near(g)) { skipped++; continue; }
       try {
         let chain = await o.it.getComponentChain();
         let comp = null;
@@ -2113,12 +2166,35 @@ async function colorMatch(project, sd, cams, result) {
           const k = chain.getComponentAtIndex(i);
           try { if ((await k.getInstanceName()) === COLOR_TAG) { comp = k; break; } } catch (e) {}
         }
+        if (comp) {   // tool changed (Color Balance <-> Lumetri): take the old one away
+          let mn = null;
+          try { mn = await comp.getMatchName(); } catch (e) {}
+          if (mn && mn !== match) {
+            transact(project, "AutoWed color", () => [chain.createRemoveComponentAction(comp)]);
+            chain = await o.it.getComponentChain();
+            comp = null;
+          }
+        }
         if (!comp) {
           const nc = await ppro.VideoFilterFactory.createComponent(match);
           if (!transact(project, "AutoWed color", () => [chain.createAppendComponentAction(nc)])) throw new Error("effect එක දාන්න බැරි වුණා");
           chain = await o.it.getComponentChain();
           comp = chain.getComponentAtIndex(chain.getComponentCount() - 1);
           try { transact(project, "AutoWed color", () => [comp.createSetInstanceNameAction(COLOR_TAG)]); } catch (e) {}
+        }
+        if (lumetri) {
+          const lp = lumetriParams(comp);
+          if (!lp) throw new Error("Lumetri: Temperature / Tint / Exposure හම්බුණේ නැහැ");
+          const L = gainToLumetri(g);
+          const ok = transact(project, "AutoWed color", () => [
+            lp.exposure.createSetValueAction(lp.exposure.createKeyframe(L.exposure), true),
+            lp.temperature.createSetValueAction(lp.temperature.createKeyframe(L.temperature), true),
+            lp.tint.createSetValueAction(lp.tint.createKeyframe(L.tint), true)]);
+          if (!ok) throw new Error("Lumetri values දාන්න බැරි වුණා");
+          if (!n) log(`Lumetri ${c.name || "Cam " + (ci + 1)}: exposure ${L.exposure > 0 ? "+" : ""}${L.exposure} · temperature ${L.temperature} · tint ${L.tint} (පළවෙනි කෑල්ල)`, "mute");
+          done++; n++;
+          await breathe();
+          continue;
         }
         const ps = rgbParams(comp);
         if (!ps) throw new Error("Red / Green / Blue parameters හම්බුණේ නැහැ");
@@ -2133,11 +2209,11 @@ async function colorMatch(project, sd, cams, result) {
           checked = true;
         }
         const ok = transact(project, "AutoWed color", () => [
-          ps.r.createSetValueAction(ps.r.createKeyframe(x.rgb[0]), true),
-          ps.g.createSetValueAction(ps.g.createKeyframe(x.rgb[1]), true),
-          ps.b.createSetValueAction(ps.b.createKeyframe(x.rgb[2]), true)]);
+          ps.r.createSetValueAction(ps.r.createKeyframe(g[0]), true),
+          ps.g.createSetValueAction(ps.g.createKeyframe(g[1]), true),
+          ps.b.createSetValueAction(ps.b.createKeyframe(g[2]), true)]);
         if (!ok) throw new Error("values දාන්න බැරි වුණා");
-        done++;
+        done++; n++;
       } catch (e) {
         failed++;
         if (failed === 1) log("Color match: " + (e && e.message || e), "warn");
@@ -2145,9 +2221,10 @@ async function colorMatch(project, sd, cams, result) {
       }
       await breathe();
     }
-    log(`Color match: ${x.name} → R ${x.rgb[0]}% · G ${x.rgb[1]}% · B ${x.rgb[2]}% (${cm.ref_name} එකට, ${x.source === "skin" ? "skin tones" : "scene"}) · කෑලි ${items.length}`, "ok");
+    if (n) log(`Exposure + WB: ${c.name || "Cam " + (ci + 1)} කෑලි ${n}කට ${mode === "avg" ? "(කැමරා දෙකේ මැදට)" : `(${cm.ref_name} එකට)`}`, "ok");
   }
   if (failed) log(`Color match: කෑලි ${failed}කට බැරි වුණා.`, "warn");
+  if (!done && !failed) log("Exposure + WB: කැමරා දැනටමත් එක වගේ, මුකුත් වෙනස් කළේ නැහැ.", "mute");
 }
 
 const NO_STAB_EVENTS = new Set(["dance_floor", "surprise_dance"]);   // handheld moving to the music is wanted
