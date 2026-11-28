@@ -1258,10 +1258,7 @@ async function runAutoEdit(jobOpts) {
   let cams, applier = null, nest = null, nestInfo = null;
   // output: "new" = your timeline is not touched, the finished edit opens as a new timeline (default);
   // "live" / "end" = cuts in your own timeline (live, or all at the end)
-  let hlMin = Number(($("x_hl") || {}).value || 0) || 0;
-  if (hlMin && sd.nestInRange) { log("Highlight cut: nested / multicam sequence එකක් ඇතුළේ තාම බැහැ - සාමාන්‍ය edit එක කරනවා.", "warn"); hlMin = 0; }
-  const outMode = hlMin ? "new" : (($("x_live") && $("x_live").value) || "new");
-  if (hlMin) log(`Highlight cut: විනාඩි ${hlMin}. ඔබේ timeline එකට අත තියන්නේ නැහැ; ඉවර වුණාම අලුත් timeline එකක් හදනවා.`, "ok");
+  const outMode = ($("x_live") && $("x_live").value) || "new";
   if (outMode === "new") {
     if (sd.nestInRange) {
       nest = sd.nestInRange;
@@ -1344,10 +1341,6 @@ async function runAutoEdit(jobOpts) {
     }
     if (j.status === "error") return false;
     if (j.status === "done") {
-      if (hlMin && j.result && j.result.highlight && (j.result.highlight.chunks || []).length) {
-        await buildHighlight(project, sd, cams, j.result, evName); return true;
-      }
-      if (hlMin) log("Highlight cut: තෝරන්න පුළුවන් කොටස් හම්බුණේ නැහැ (music / හොඳ shots මදි). සම්පූර්ණ edit එක හදනවා.", "warn");
       if (outMode === "new") { await finishInCopy(project, sd, kind, j.result, evName, null); return true; }
       await finish(project, kind, sd, nest, nestInfo, applier, cams, j.result, outMode === "end"); return true;
     }
@@ -1482,260 +1475,6 @@ function shiftResult(r, d) {
   if (x.color && x.color.pieces) for (const o of x.color.pieces) sh(o, ["start", "end"]);
   x.shifted = true;
   return x;
-}
-
-// ---------------------------------------------------------------- Highlight cut ------------------------
-// The engine's plan (result.highlight): pieces of continuous sound from the best mic, each starting and
-// ending on a downbeat, the camera shots inside them, and short "cover" shots for holes. Built as a NEW
-// timeline: every camera keeps its own layer (the chosen one enabled, the others disabled, like a normal
-// AutoWed edit), cover shots on the layer above, the sound on A1/A2 with equal-power crossfades.
-const LEVEL = (db) => Math.min(1, Math.pow(10, (db - 15) / 20));   // Premiere Volume "Level": 0 dB = 0.1778
-// the clip that starts at `ticks` on a track (items come in time order: binary search, few awaits)
-async function itemStartingAt(track, ticks, tpf) {
-  const items = track.getTrackItems(ppro.Constants.TrackItemType.CLIP, false);
-  let lo = 0, hi = items.length - 1;
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    const st = tk(await items[mid].getStartTime());
-    if (Math.abs(st - ticks) < tpf / 2) return items[mid];
-    if (st < ticks) lo = mid + 1; else hi = mid - 1;
-  }
-  for (const it of items) if (Math.abs(tk(await it.getStartTime()) - ticks) < tpf / 2) return it;
-  return null;
-}
-async function buildHighlight(project, sd, cams, result, evName) {
-  const H = result.highlight;
-  const C = cams.length;
-  showProgress("finish", 0.9, null);
-  renderStrip(result.segments, result.range[0], result.range[1], result.range[1]);
-  try { await qcReportOnly(result); } catch (e) {}
-  const tpf = await ticksPerFrame(sd.seq);
-  const F = (sec) => Math.round(sec * TICKS / tpf);
-  const srcSeq = () => freshSeq(project, sd.seq, sd.guid);
-  // source items: camera video tracks + every audio track (audio found by file + time)
-  const vCache = {};
-  const vItem = async (ci, t) => {
-    if (!vCache[ci]) {
-      vCache[ci] = [];
-      const tr = await (await srcSeq()).getVideoTrack(cams[ci].track);
-      for (const it of tr.getTrackItems(ppro.Constants.TrackItemType.CLIP, false)) vCache[ci].push({ o: await readTI(it), raw: await it.getProjectItem(), name: await it.getName() });
-    }
-    return vCache[ci].find((x) => x.o.a <= t + 0.02 && x.o.b >= t - 0.02) || null;
-  };
-  let aCache = null;
-  const aItem = async (path, t) => {
-    if (!aCache) {
-      aCache = [];
-      const s = await srcSeq();
-      const n = await s.getAudioTrackCount();
-      for (let i = 0; i < n; i++) {
-        for (const it of (await s.getAudioTrack(i)).getTrackItems(ppro.Constants.TrackItemType.CLIP, false)) {
-          const r = await readItem(it);
-          aCache.push({ o: await readTI(it), raw: await it.getProjectItem(), path: r.path, name: r.name });
-        }
-      }
-    }
-    const norm = (p) => String(p || "").replace(/\//g, "\\").toLowerCase();
-    return aCache.find((x) => norm(x.path) === norm(path) && x.o.a <= t + 0.02 && x.o.b >= t - 0.02)
-        || aCache.find((x) => x.o.a <= t + 0.02 && x.o.b >= t - 0.02) || null;
-  };
-  // 1) the new timeline (settings from a real camera clip), emptied
-  const first = await vItem(H.shots.length ? H.shots[0].cam : 0, H.shots.length ? (H.shots[0].a + H.shots[0].b) / 2 : H.chunks[0].a + 0.5);
-  if (!first) { log("Highlight cut: පළවෙනි clip එක හම්බුණේ නැහැ.", "bad"); return; }
-  const name = `${evName} · Highlight ${Math.round(H.total / 60)} min`;
-  let ns = await project.createSequenceFromMedia(name, [first.raw]);
-  if (!ns) { log("Highlight cut: අලුත් timeline එක හදන්න බැරි වුණා.", "bad"); return; }
-  const NG = ns.guid.toString();
-  const NS = async () => (ns = await freshSeq(project, ns, NG));
-  const clearTrack = async (audio, i) => removeWhere(project, NS, async (s) => {
-    const n = audio ? await s.getAudioTrackCount() : await s.getVideoTrackCount();
-    if (i >= n) return [];
-    return (audio ? await s.getAudioTrack(i) : await s.getVideoTrack(i)).getTrackItems(ppro.Constants.TrackItemType.CLIP, false);
-  }, audio ? ppro.Constants.MediaType.AUDIO : ppro.Constants.MediaType.VIDEO, "AutoWed highlight");
-  for (let i = 0; i < 3; i++) { await clearTrack(false, i); await clearTrack(true, i); }
-  try { await project.openSequence(await NS()); } catch (e) {}
-  log(`Highlight cut: "${name}" හදනවා · කොටස් ${H.chunks.length} · shots ${H.shots.length} · හිස් තැන් වසන shots ${H.cutaways.length}`, "ok");
-
-  // layers: V1..Vn cameras, V(n+1) cover shots, V(n+2) scratch (the picture half of the sound pieces,
-  // removed); A1/A2 the chosen sound, A3.. every camera's own sound (kept, disabled - nothing deleted)
-  const VSCR = C + 1, ACAM = (ci) => 2 + ci;
-  const checked = {};
-  const place = async (src, aF, bF, newF, vIdx, aIdx) => {
-    const off = IO_OFFSET[src.name] || 0;
-    const inT = src.o.ki + (aF * tpf - src.o.ka) - off, outT = inT + (bF - aF) * tpf;
-    const pi = ppro.ClipProjectItem.cast(src.raw);
-    let setIO = false;
-    try {
-      transact(project, "AutoWed highlight", () => [pi.createSetInOutPointsAction(ttk(inT), ttk(outT))]);
-      setIO = true;
-      await retryStale(async () => {
-        const s = await NS();
-        transact(project, "AutoWed highlight", () => [ppro.SequenceEditor.getEditor(s).createOverwriteItemAction(src.raw, ttk(newF * tpf), vIdx, aIdx)]);
-      });
-    } finally {
-      if (setIO) { try { transact(project, "AutoWed highlight", () => [pi.createClearInOutPointsAction()]); } catch (e) {} }
-    }
-    // first piece of every file: the In/Out of some files (phones) sits a few frames off - measure, redo once
-    if (!checked[src.name] && vIdx >= 0 && vIdx < C + 1) {
-      checked[src.name] = true;
-      const tr = await (await NS()).getVideoTrack(vIdx);
-      for (const it of tr.getTrackItems(ppro.Constants.TrackItemType.CLIP, false)) {
-        const o = await readTI(it);
-        if (Math.abs(o.ka - newF * tpf) < tpf / 2) {
-          const want = src.o.ki + (aF * tpf - src.o.ka);
-          const d = o.ki - want;
-          if (Math.abs(d) >= tpf / 2) { IO_OFFSET[src.name] = off + d; checked[src.name] = false; return place(src, aF, bF, newF, vIdx, aIdx); }
-          break;
-        }
-      }
-    }
-  };
-  // frame plan: piece k plays at N[k] .. N[k] + len[k] in the new timeline
-  // every layer made up front, in order: an overwrite to a layer that is not there yet lands on the next
-  // new one (seen: V5 asked, V4 used); 1-frame pieces far after the end, removed again
-  {
-    const far = F(36000);
-    const f0 = Math.round(first.o.ka / tpf);
-    for (let i = 0; i <= C + 2; i++) {
-      try { await place(first, f0, f0 + 1, far + 2 * i, i, i); } catch (e) {}
-    }
-    const vn = await (await NS()).getVideoTrackCount(), an = await (await NS()).getAudioTrackCount();
-    for (let i = 0; i < vn; i++) await clearTrack(false, i);
-    for (let i = 0; i < an; i++) await clearTrack(true, i);
-    for (const k of Object.keys(checked)) delete checked[k];
-  }
-  let cum = 0;
-  const cs = H.chunks.map((c) => { const a = F(c.a), b = F(c.b); const x = { ...c, fa: a, fb: b, n0: cum, hi: F(c.h_in || 0), ho: F(c.h_out || 0) }; cum += b - a; return x; });
-  const total = H.chunks.length + H.shots.length + H.cutaways.length;
-  let done = 0, fails = 0;
-  const tick = () => { done++; if (done % 4 === 0) showProgress("cuts", 0.9 + 0.09 * done / total, null); };
-
-  // 2) sound: piece k on A1 / A2 in turn, with handles for the crossfades
-  for (let k = 0; k < cs.length; k++) {
-    if (STOPPING) return;
-    const c = cs[k];
-    const src = await aItem(c.name, (c.a + c.b) / 2);
-    if (!src) { fails++; log(`Highlight: කොටස ${k + 1} audio clip එක හම්බුණේ නැහැ`, "warn"); tick(); continue; }
-    try { await place(src, c.fa - c.hi, c.fb + c.ho, c.n0 - c.hi, VSCR, k % 2); }
-    catch (e) { fails++; log(`Highlight: කොටස ${k + 1} audio: ${e && e.message || e}`, "warn"); }
-    tick();
-    await breathe();
-  }
-  { const n = await (await NS()).getVideoTrackCount(); for (let i = n - 1; i >= C; i--) await clearTrack(false, i); }
-  // 3) pictures: every camera that has this moment goes on its own layer
-  const sel = [];     // [n0, n1, cam] chosen camera per new-timeline frame range
-  for (const s of H.shots) {
-    if (STOPPING) return;
-    const c = cs[s.chunk];
-    const aF = Math.max(F(s.a), c.fa), bF = Math.min(F(s.b), c.fb);
-    if (bF - aF < 1) { tick(); continue; }
-    const n0 = c.n0 + (aF - c.fa);
-    sel.push([n0, n0 + (bF - aF), s.cam]);
-    for (let ci = 0; ci < C; ci++) {
-      const mid = (aF + bF) / 2 * tpf / TICKS;
-      const src = await vItem(ci, mid);
-      if (!src || src.o.a > aF * tpf / TICKS + 0.02 || src.o.b < bF * tpf / TICKS - 0.02) continue;
-      try { await place(src, aF, bF, n0, ci, ACAM(ci)); }
-      catch (e) { if (ci === s.cam) { fails++; log(`Highlight shot ${fmt(n0 * tpf / TICKS)}: ${e && e.message || e}`, "warn"); } }
-    }
-    tick();
-    await breathe();
-  }
-  // 4) holes covered with the best unused shot of the same length (layer above the cameras)
-  for (const h of H.cutaways) {
-    const c = cs[h.chunk];
-    const aF = Math.max(F(h.a), c.fa), bF = Math.min(F(h.b), c.fb);
-    if (bF - aF < 1) { tick(); continue; }
-    const sF = F(h.src);
-    const src = await vItem(h.cam, (sF + (bF - aF) / 2) * tpf / TICKS);
-    if (src) { try { await place(src, sF, sF + (bF - aF), c.n0 + (aF - c.fa), C, ACAM(C)); } catch (e) { fails++; } }
-    tick();
-  }
-  // the cameras' own sound stays (A3..), disabled: one clip per transaction, each looked up fresh
-  {
-    const offA = [];
-    const an = await (await NS()).getAudioTrackCount();
-    for (let i = 2; i < an; i++) {
-      for (const it of (await (await NS()).getAudioTrack(i)).getTrackItems(ppro.Constants.TrackItemType.CLIP, false)) offA.push([i, tk(await it.getStartTime())]);
-    }
-    for (let i = 0; i < offA.length; i++) {
-      try {
-        await retryStale(async () => {
-          const it = await itemStartingAt(await (await NS()).getAudioTrack(offA[i][0]), offA[i][1], tpf);
-          if (it && !(await it.isDisabled())) transact(project, "AutoWed highlight", () => [it.createSetDisabledAction(true)]);
-        });
-      } catch (e) {}
-      if (i % 10 === 0) { showProgress("finish", 0.98, null); await breathe(); }
-    }
-  }
-  // 5) only the chosen camera enabled
-  showProgress("finish", 0.99, null);
-  const chosenAt = (f) => { for (const x of sel) if (f >= x[0] && f < x[1]) return x[2]; return -1; };
-  // Premiere 26.5: one clip per transaction, each looked up fresh
-  const off = [];
-  for (let ci = 0; ci < C; ci++) {
-    try {
-      const tr = await (await NS()).getVideoTrack(ci);
-      for (const it of tr.getTrackItems(ppro.Constants.TrackItemType.CLIP, false)) {
-        const a = tk(await it.getStartTime()), b = tk(await it.getEndTime());
-        if (chosenAt(Math.floor((a + b) / 2 / tpf)) !== ci) off.push([ci, a]);
-      }
-    } catch (e) { log("Highlight: layers: " + (e && e.message || e), "warn"); }
-  }
-  let offFails = 0;
-  for (let i = 0; i < off.length; i++) {
-    try {
-      await retryStale(async () => {
-        const it = await itemStartingAt(await (await NS()).getVideoTrack(off[i][0]), off[i][1], tpf);
-        if (it && !(await it.isDisabled())) transact(project, "AutoWed highlight", () => [it.createSetDisabledAction(true)]);
-      });
-    } catch (e) { offFails++; }
-    if (i % 10 === 0) { showProgress("finish", 0.99, null); await breathe(); }
-  }
-  if (offFails) log(`Highlight: disable කරන්න බැරි වුණු කෑලි ${offFails}`, "warn");
-  // 6) sound: same loudness for every piece + equal-power crossfades (and a fade in / out at the ends)
-  const fadeKeys = (inp, start, len, g, fin, fout, inCurve, outCurve) => {
-    // positions are media time of the clip (its In point + offset)
-    const pts = [];
-    const P = [0, 0.25, 0.5, 0.75, 1];
-    const curve = (x, out) => out ? Math.cos(x * Math.PI / 2) : Math.sin(x * Math.PI / 2);
-    if (fin > 0) for (const x of P) pts.push([inp + x * fin, inCurve ? curve(x, false) : x]);
-    else pts.push([inp, 1]);
-    if (fout > 0) for (const x of P) pts.push([inp + len - fout + x * fout, outCurve ? curve(x, true) : 1 - x]);
-    else pts.push([inp + len, 1]);
-    return pts.map(([t, k]) => [t, k <= 0.0005 ? 0 : LEVEL(20 * Math.log10(k) + g)]);
-  };
-  for (let k = 0; k < cs.length; k++) {
-    const c = cs[k];
-    const startT = (c.n0 - c.hi) * tpf;
-    try {
-      await retryStale(async () => {
-        const it = await itemStartingAt(await (await NS()).getAudioTrack(k % 2), startT, tpf);
-        if (!it) throw new Error("audio clip එක හම්බුණේ නැහැ");
-        const o = await readTI(it);
-        const len = (o.kb - o.ka) / TICKS;
-        const fin = c.hi > 0 ? 2 * c.hi * tpf / TICKS : (k === 0 ? (H.fade_in || 1) : 3 * tpf / TICKS);
-        const fout = c.ho > 0 ? 2 * c.ho * tpf / TICKS : (k === cs.length - 1 ? (H.fade_out || 2.5) : 3 * tpf / TICKS);
-        const keys = fadeKeys(o.inp, 0, len, c.gain_db || 0, Math.min(fin, len / 3), Math.min(fout, len / 3), c.hi > 0, c.ho > 0);
-        const p = (await it.getComponentChain()).getComponentAtIndex(0).getParam(1);
-        const ok = transact(project, "AutoWed highlight", () => {
-          const acts = [p.createSetTimeVaryingAction(true)];
-          for (const [t, v] of keys) { const kf = p.createKeyframe(v); kf.position = tt(t); acts.push(p.createAddKeyframeAction(kf)); }
-          return acts;
-        });
-        if (!ok) throw new Error("keyframes දාන්න බැරි වුණා");
-      });
-    } catch (e) { log(`Highlight: කොටස ${k + 1} fade: ${e && e.message || e}`, "warn"); }
-    if (k % 4 === 0) await breathe();
-  }
-  // 7) a marker at every piece: where it came from (to swap a piece quickly)
-  try {
-    await addMarkers(project, await NS(), cs.map((c, k) => ({ name: `කොටස ${k + 1}: ${fmt(c.a)}–${fmt(c.b)} (mic ${c.atrack + 1}${c.gain_db ? `, ${c.gain_db > 0 ? "+" : ""}${c.gain_db} dB` : ""})`,
-      start: c.n0 * tpf / TICKS, dur: 0.1 })));
-  } catch (e) {}
-  showProgress("done", 1, null);
-  log(`✔ Highlight cut ඉවරයි: "${name}" · ${fmt(cum * tpf / TICKS)} · කොටස් ${cs.length} · crossfades ${cs.filter((c) => c.ho > 0).length}` +
-      (fails ? ` · බැරි වුණු කෑලි ${fails}` : ""), fails ? "warn" : "ok");
 }
 
 async function finishInCopy(project, sd, kind, result, evName, resumeGuid) {
@@ -2547,7 +2286,6 @@ function gatherExtras() {
     best_mic: v("x_mic", "copy") === "copy",
     couple: v("x_couple", "on") === "on",
     qc_markers: v("x_qc", "on") !== "off",
-    highlight_min: Number(v("x_hl", "0")) || 0,
   };
 }
 
@@ -2661,7 +2399,7 @@ async function showStats() {
 }
 
 // studio presets: every panel setting, saved as a file others can copy (Documents\AutoWed Presets)
-const PRESET_IDS = ["event", "etype", "x_hl", "x_live", "x_audon", "x_alink", "min_shot", "max_shot", "stab", "stab_thr", "x_sil", "x_flash", "x_trim", "x_trans", "x_loud", "x_mic", "x_couple", "x_qc", "x_color"];
+const PRESET_IDS = ["event", "etype", "x_live", "x_audon", "x_alink", "min_shot", "max_shot", "stab", "stab_thr", "x_sil", "x_flash", "x_trim", "x_trans", "x_loud", "x_mic", "x_couple", "x_qc", "x_color"];
 let STUDIO = [];
 async function presetsRefresh(quiet) {
   try {
