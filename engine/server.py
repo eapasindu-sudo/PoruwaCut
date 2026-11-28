@@ -319,6 +319,7 @@ def __run_edit_impl(job, body):
             mode = body.get("event") or body.get("mode") or "auto"
             out_dir = body.get("out_dir") or _default_out(p, mode)
             os.makedirs(out_dir, exist_ok=True)
+            job["out_dir"] = os.path.abspath(out_dir)
             _remember_cache(os.path.join(os.path.dirname(os.path.abspath(out_dir)), ".poruwacut_cache"))
             proj.save(p, os.path.join(out_dir, "project.json"))
             ov = {k: o.get(k) for k in ("min_shot", "max_shot", "switch_cost", "stay_cost")}
@@ -543,6 +544,16 @@ def api(method: str, path: str, body: dict | None = None):
                     return 200, {"ok": r.status == 200}
             except Exception as e:  # noqa: BLE001
                 return 502, {"error": str(e)}
+        if path == "/api/cleanup":
+            job = JOBS.get(body.get("job") or "")
+            if not job or job.get("status") not in ("done", "error", "cancelled"):
+                return 409, {"error": "edit එක තාම ඉවර නැහැ"}
+            cache = bool(body.get("cache"))
+            if cache and any(j.get("status") in ("queued", "running") for j in JOBS.values()):
+                cache = False
+            r = cleanup_job(job, cache)
+            print(f"Cleanup: {r.get('files', 0)} files, {r.get('freed_mb', 0)} MB" + (" (cache එකත්)" if cache else ""), flush=True)
+            return 200, r
         if path == "/api/cache/clear":
             if any(j.get("status") in ("queued", "running") for j in JOBS.values()):
                 return 409, {"error": "edit එකක් run වෙනවා: ඉවර වුණාම cache clear කරන්න"}
@@ -642,6 +653,57 @@ def _cache_dirs(media_paths=None) -> list[str]:
         pass
     # only folders that are AutoWed's own caches
     return [d for d in dict.fromkeys(out) if os.path.basename(os.path.normpath(d)) in ("cache", ".poruwacut_cache")]
+
+
+# working files of one edit (the XML copy is a result for the editor: kept)
+WORK_FILES = ("project.json", "result.json", "cuts.csv", "scores.npz")
+
+
+def cleanup_job(job: dict, with_cache: bool = False) -> dict:
+    """After the panel has applied an edit: delete its working files, and the analysis cache too when
+    asked. Only AutoWed's own files inside a "PoruwaCut_out" folder are touched."""
+    import shutil
+    out = job.get("out_dir")
+    files = size = 0
+    if not out or os.path.basename(os.path.dirname(os.path.normpath(out))) != "PoruwaCut_out":
+        return {"files": 0, "freed_mb": 0.0, "skipped": "not an AutoWed output folder"}
+
+    def rm(fp):
+        nonlocal files, size
+        try:
+            n = os.path.getsize(fp)
+            os.remove(fp)
+            files += 1
+            size += n
+        except OSError:
+            pass
+    if os.path.isdir(out):
+        for fn in os.listdir(out):
+            if fn in WORK_FILES or fn.endswith(".part.npz"):
+                rm(os.path.join(out, fn))
+        try:
+            os.rmdir(out)              # only when nothing else (an XML copy) is left
+        except OSError:
+            pass
+    root = os.path.dirname(os.path.normpath(out))
+    # review frames / calibration pictures written there by AutoWed
+    import glob as _g
+    for pat in ("awcal_*.png", "awcal_*.jpg", "hl_*.png", "rv_*.png"):
+        for fp in _g.glob(os.path.join(root, pat)):
+            rm(fp)
+    if with_cache:
+        cd = os.path.join(root, ".poruwacut_cache")
+        if os.path.isdir(cd):
+            n, sz = _dir_size(cd)
+            shutil.rmtree(cd, ignore_errors=True)
+            if not os.path.isdir(cd):
+                files += n
+                size += sz
+    try:
+        os.rmdir(root)
+    except OSError:
+        pass
+    return {"files": files, "freed_mb": round(size / 1e6, 1)}
 
 
 def _dir_size(d: str) -> tuple[int, int]:

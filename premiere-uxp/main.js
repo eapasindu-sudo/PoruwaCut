@@ -1168,11 +1168,24 @@ async function autoEdit() {
   LAST_DONE = ""; LAST_BAD = "";
   const ev = eventName(($("event") && $("event").value) || "auto");
   let ok = false;
-  try { ok = await runAutoEdit(); }
+  let job = null;
+  try { ok = await runAutoEdit(); job = CUR_JOB; }
   catch (e) { log("Error: " + (e && e.message || e), "bad"); }
   finally { busy = false; $("go").disabled = false; showStop(false); }
+  if (ok) await cleanupAfter(job);
   if (ok) notifyPhone(`✔ ${ev} edit එක ඉවරයි`, LAST_DONE || "Auto edit ඉවරයි.", "white_check_mark");
   else if (!STOPPING) notifyPhone(`✖ ${ev} edit එක ඉවර වුණේ නැහැ`, LAST_BAD || "Panel එකේ Log එක බලන්න.", "warning", "high");
+}
+
+// After an edit is applied: the engine's working files go (and the analysis cache, if chosen in Settings)
+async function cleanupAfter(job, withCache) {
+  const mode = ($("x_clean") && $("x_clean").value) || "work";
+  if (!job || mode === "off") return;
+  const cache = withCache === undefined ? mode === "all" : !!withCache;
+  try {
+    const r = await call("POST", "/api/cleanup", { job, cache });
+    if (r && r.files) log(`Temp files ${r.files}ක් delete කළා (${r.freed_mb} MB)` + (cache ? " · analysis cache එකත්" : ""), "mute");
+  } catch (e) { log("Temp files delete කරන්න බැරි වුණා: " + (e && e.message || e), "warn"); }
 }
 
 // ---------- phone notifications (ntfy) ----------
@@ -1973,6 +1986,7 @@ async function qRun() {
   busy = true; $("go").disabled = true; $("qrun").disabled = true; showStop(true);
   try {
     let n = 0;
+    const doneJobs = [];
     for (const q of todo) {
       if (STOPPING) { log("■ Batch ලිස්ට් එක නැවැත්තුවා.", "warn"); break; }
       n++;
@@ -1996,12 +2010,15 @@ async function qRun() {
         await project.openSequence(seq);
         await sleep(400);
         ok = await runAutoEdit({ range: q.range, event: q.event, kind: q.kind });
+        // the next items of the list use the same analysis cache: only work files go now
+        if (ok) { doneJobs.push(CUR_JOB); await cleanupAfter(CUR_JOB, false); }
       } catch (e) { log("Batch: " + (e && e.message || e), "bad"); }
       q.status = ok ? "done" : "error"; qSave(); qRender(); goLabel();
       if (!STOPPING) notifyPhone(ok ? `✔ ${eventName(q.event)} (${n}/${todo.length})` : `✖ ${eventName(q.event)} (${n}/${todo.length})`,
         ok ? (LAST_DONE || "edit එක ඉවරයි") : (LAST_BAD || "Log එක බලන්න"), ok ? "white_check_mark" : "warning");
     }
     log("✔ Batch ලිස්ට් එක ඉවරයි.", "ok");
+    if (($("x_clean") || {}).value === "all") for (const jb of doneJobs) await cleanupAfter(jb, true);   // every footage folder's cache
     const okN = todo.filter((q) => q.status === "done").length;
     notifyPhone("🎬 Batch ඉවරයි", `${okN}/${todo.length} edits ඉවරයි${okN < todo.length ? " · " + (todo.length - okN) + "ක් බැරි වුණා" : ""}.`, "tada", "high");
   } finally { busy = false; $("go").disabled = false; $("qrun").disabled = false; showStop(false); }
@@ -2399,7 +2416,7 @@ async function showStats() {
 }
 
 // studio presets: every panel setting, saved as a file others can copy (Documents\AutoWed Presets)
-const PRESET_IDS = ["event", "etype", "x_live", "x_audon", "x_alink", "min_shot", "max_shot", "stab", "stab_thr", "x_sil", "x_flash", "x_trim", "x_trans", "x_loud", "x_mic", "x_couple", "x_qc", "x_color"];
+const PRESET_IDS = ["event", "etype", "x_live", "x_audon", "x_alink", "min_shot", "max_shot", "stab", "stab_thr", "x_sil", "x_flash", "x_trim", "x_trans", "x_loud", "x_mic", "x_couple", "x_qc", "x_color", "x_clean"];
 let STUDIO = [];
 async function presetsRefresh(quiet) {
   try {
